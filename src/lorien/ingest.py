@@ -128,7 +128,7 @@ class LorienIngester:
             triples = self._keyword_extract(text)
         return self._store_triples(triples, source)
 
-    def ingest_memory_md(self, path: str) -> IngestResult:
+    def ingest_memory_md(self, path: str, verbose: bool = False) -> IngestResult:
         content = Path(path).read_text(encoding="utf-8")
         result = IngestResult()
         lines = content.split("\n")
@@ -146,10 +146,15 @@ class LorienIngester:
         if current_lines:
             sections.append((current_header, current_lines))
 
+        total = len([s for s in sections if "\n".join(s[1]).strip()])
+        done = 0
         for header, sec_lines in sections:
             body = "\n".join(sec_lines).strip()
             if not body:
                 continue
+            done += 1
+            if verbose and self.llm_model:
+                print(f"  [{done}/{total}] {header[:50]}", flush=True)
             section_source = f"MEMORY.md:{header}"
             current = self.ingest_text(body, source=section_source)
             result.entities_added += current.entities_added
@@ -161,33 +166,69 @@ class LorienIngester:
 
     def _llm_extract(self, text: str) -> ExtractedTriples | None:
         try:
-            import urllib.request
-
-            payload = json.dumps(
-                {
-                    "model": self.llm_model,
-                    "messages": [
-                        {"role": "system", "content": SYSTEM_PROMPT},
-                        {"role": "user", "content": USER_PROMPT.format(text=text)},
-                    ],
-                    "temperature": 0.1,
-                    "response_format": {"type": "json_object"},
-                }
-            ).encode()
-            request = urllib.request.Request(
-                f"{self.base_url}/chat/completions",
-                data=payload,
-                headers={
-                    "Authorization": f"Bearer {self.api_key}",
-                    "Content-Type": "application/json",
-                },
-            )
-            with urllib.request.urlopen(request, timeout=30) as response:
-                raw = json.loads(response.read())
-            content = raw["choices"][0]["message"]["content"]
-            return self._parse_llm_output(json.loads(content))
+            if self.llm_model and self.llm_model.startswith("claude"):
+                return self._anthropic_extract(text)
+            return self._openai_extract(text)
         except Exception:
             return None
+
+    def _anthropic_extract(self, text: str) -> ExtractedTriples | None:
+        """Anthropic Messages API (claude-* models)."""
+        import urllib.request
+
+        combined = SYSTEM_PROMPT + "\n\n" + USER_PROMPT.format(text=text)
+        payload = json.dumps(
+            {
+                "model": self.llm_model,
+                "max_tokens": 4096,
+                "messages": [{"role": "user", "content": combined}],
+            }
+        ).encode()
+        request = urllib.request.Request(
+            "https://api.anthropic.com/v1/messages",
+            data=payload,
+            headers={
+                "x-api-key": self.api_key,
+                "anthropic-version": "2023-06-01",
+                "Content-Type": "application/json",
+            },
+        )
+        with urllib.request.urlopen(request, timeout=60) as response:
+            raw = json.loads(response.read())
+        content = raw["content"][0]["text"]
+        # Strip markdown code fences if present
+        json_match = re.search(r"\{.*\}", content, re.DOTALL)
+        if json_match:
+            return self._parse_llm_output(json.loads(json_match.group()))
+        return None
+
+    def _openai_extract(self, text: str) -> ExtractedTriples | None:
+        """OpenAI-compatible API."""
+        import urllib.request
+
+        payload = json.dumps(
+            {
+                "model": self.llm_model,
+                "messages": [
+                    {"role": "system", "content": SYSTEM_PROMPT},
+                    {"role": "user", "content": USER_PROMPT.format(text=text)},
+                ],
+                "temperature": 0.1,
+                "response_format": {"type": "json_object"},
+            }
+        ).encode()
+        request = urllib.request.Request(
+            f"{self.base_url}/chat/completions",
+            data=payload,
+            headers={
+                "Authorization": f"Bearer {self.api_key}",
+                "Content-Type": "application/json",
+            },
+        )
+        with urllib.request.urlopen(request, timeout=30) as response:
+            raw = json.loads(response.read())
+        content = raw["choices"][0]["message"]["content"]
+        return self._parse_llm_output(json.loads(content))
 
     def _parse_llm_output(self, raw: dict[str, Any]) -> ExtractedTriples:
         triples = ExtractedTriples()

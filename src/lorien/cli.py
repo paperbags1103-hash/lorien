@@ -38,21 +38,42 @@ def status(db: str) -> None:
 @main.command()
 @click.argument("file", type=click.Path(exists=True))
 @click.option("--db", default=DEFAULT_DB, show_default=True)
-@click.option("--model", default=None, help="LLM model (enables LLM extraction)")
-@click.option("--api-key", default=None, envvar="LORIEN_API_KEY")
+@click.option("--model", default=None, help="LLM model e.g. claude-haiku-3-5 (enables LLM extraction)")
+@click.option("--api-key", default=None, envvar=["ANTHROPIC_API_KEY", "LORIEN_API_KEY"],
+              help="API key (reads ANTHROPIC_API_KEY or LORIEN_API_KEY from env)")
 @click.option("--base-url", default=None, envvar="LORIEN_LLM_BASE_URL")
-def ingest(file: str, db: str, model: str | None, api_key: str | None, base_url: str | None) -> None:
-    """Ingest a text or MEMORY.md file."""
+@click.option("--verbose", "-v", is_flag=True, default=False)
+def ingest(
+    file: str, db: str, model: str | None, api_key: str | None,
+    base_url: str | None, verbose: bool
+) -> None:
+    """Ingest a text or MEMORY.md file.
+
+    With --model: uses LLM for rich entity extraction.
+    Without --model: keyword fallback (rules only).
+
+    Example:
+      lorien ingest MEMORY.md --model claude-haiku-3-5
+    """
     from .ingest import LorienIngester
+
+    if model and not api_key:
+        click.echo("⚠ --model set but no API key found (set ANTHROPIC_API_KEY)", err=True)
+        sys.exit(1)
 
     store = GraphStore(db_path=db)
     ingester = LorienIngester(store, llm_model=model, api_key=api_key, base_url=base_url)
+
+    if verbose and model:
+        click.echo(f"→ LLM mode: {model}")
+
     filename = Path(file).name
     if filename.upper().startswith("MEMORY") and file.endswith(".md"):
-        result = ingester.ingest_memory_md(file)
+        result = ingester.ingest_memory_md(file, verbose=verbose)
     else:
         text = Path(file).read_text(encoding="utf-8")
         result = ingester.ingest_text(text, source=file)
+
     click.echo(
         f"✓ {file}: +{result.entities_added} entities, +{result.facts_added} facts, +{result.rules_added} rules"
     )
