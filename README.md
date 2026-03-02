@@ -12,17 +12,9 @@ pip install "lorien-memory[vectors]"  # + semantic search
 
 ## Why lorien?
 
-| Feature | Mem0 | lorien |
-|---------|------|--------|
-| Conversation memory | ✅ | ✅ |
-| Semantic vector search | ✅ | ✅ |
-| Local (no server) | ❌ | ✅ |
-| Cost | $249/mo | **$0** |
-| Priority rule system | ❌ | ✅ |
-| Causal reasoning (CAUSED) | ❌ | ✅ |
-| **Auto contradiction detection** | ❌ | ✅ |
+> *"Other tools tell you what the user said. lorien tells you what to believe, why, and what conflicts."*
 
-lorien stores *structured knowledge* — not just flat strings. Every fact has a source, every rule has a priority, and contradictions are detected automatically.
+lorien stores *structured knowledge* — not just flat strings. Every fact has a source, every rule has a priority, and contradictions are detected automatically. Local, free, no server required.
 
 ---
 
@@ -186,13 +178,6 @@ DB stored at `~/.lorien/db`. Vectors at `~/.lorien/vectors.db`.
 - [ ] v1.0 — LangChain adapter
 
 ---
-
-## vs Mem0
-
-Mem0 answers: *"What did the user say?"*  
-lorien answers: *"What should I believe, why, and does it contradict anything?"*
-
-Use both. They're complementary, not competitors.
 
 ---
 
