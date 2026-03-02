@@ -133,6 +133,52 @@ def sync(to_md: str, entity: str | None, db: str) -> None:
 
 
 @main.command()
+@click.argument("user_id")
+@click.option("--db", default=DEFAULT_DB, show_default=True)
+@click.option("--model", default=None, help="LLM model for extraction")
+@click.option("--api-key", default=None, envvar=["ANTHROPIC_API_KEY", "LORIEN_API_KEY"])
+@click.option("--limit", default=20, show_default=True)
+def memory(user_id: str, db: str, model: str | None, api_key: str | None, limit: int) -> None:
+    """Show all memories for USER_ID, or pipe a conversation for real-time ingestion.
+
+    Show memories:
+      lorien memory 아부지
+
+    Add from stdin (JSON messages):
+      echo '[{"role":"user","content":"나는 커피를 싫어해"}]' | lorien memory 아부지 --model haiku
+    """
+    import select
+
+    from .memory import LorienMemory
+
+    mem = LorienMemory(db_path=db, model=model, api_key=api_key)
+
+    # Check if stdin has data (piped input)
+    if select.select([sys.stdin], [], [], 0.0)[0]:
+        import json as _json
+        raw = sys.stdin.read().strip()
+        try:
+            messages = _json.loads(raw)
+        except Exception:
+            click.echo("⚠ stdin must be JSON array of {role, content} objects", err=True)
+            sys.exit(1)
+        result = mem.add(messages, user_id=user_id)
+        click.echo(f"✓ +{result['entities']} entities, +{result['facts']} facts, +{result['rules']} rules")
+    else:
+        # Show all memories
+        memories = mem.get_all(user_id=user_id, limit=limit)
+        if not memories:
+            click.echo(f"No memories for {user_id}")
+            return
+        click.echo(f"\n{user_id} — {len(memories)} memories")
+        click.echo("─" * 40)
+        for m in memories:
+            prefix = "★" if m["type"] == "rule" else "•"
+            extra = f" [p{m.get('priority', '')}]" if m["type"] == "rule" else f" [{m['score']:.2f}]"
+            click.echo(f"  {prefix} {m['memory']}{extra}")
+
+
+@main.command()
 @click.option("--db", default=DEFAULT_DB, show_default=True)
 @click.option("--port", default=7331, show_default=True)
 def serve(db: str, port: int) -> None:
