@@ -4,6 +4,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 import uuid
 
+DEFAULT_AGENT_ID = "default"
+
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -38,6 +40,18 @@ class Entity:
 
 
 @dataclass
+class Agent:
+    name: str
+    id: str = field(default_factory=_uid)
+    kind: str = "agent"
+    agent_type: str = "llm"   # "llm" | "human" | "system"
+    metadata: str = "{}"      # JSON blob (model version, config, etc.)
+    created_at: str = field(default_factory=_now)
+    last_active_at: str = field(default_factory=_now)
+    status: str = "active"
+
+
+@dataclass
 class Fact:
     text: str
     id: str = field(default_factory=_uid)
@@ -54,6 +68,7 @@ class Fact:
     last_confirmed: str = field(default_factory=_now)
     expires_at: str = ""   # empty = never expires
     version: int = 1
+    agent_id: str = DEFAULT_AGENT_ID
     confidence: float = 1.0
     source: str = ""
     source_ref: str = ""
@@ -71,6 +86,7 @@ class Rule:
     updated_at: str = field(default_factory=_now)
     last_confirmed: str = field(default_factory=_now)
     expires_at: str = ""   # empty = never expires
+    agent_id: str = DEFAULT_AGENT_ID
     confidence: float = 1.0
     source: str = ""
     source_ref: str = ""
