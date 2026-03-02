@@ -4,6 +4,36 @@ All notable changes to `lorien-memory` are documented here.
 
 ---
 
+## [0.4.0] — 2026-03-03
+
+### Added
+
+**Epistemic Debt** (`lorien debt`)
+- `GraphStore.get_epistemic_debt()` — surfaces facts that are old, high-confidence, and never re-confirmed; sorted by `debt_score = confidence × age_days / 365`
+- `LorienMemory.get_epistemic_debt()` — convenience wrapper
+- `LorienMemory.review_debt()` — take action: `confirm` / `update` (creates SUPERSEDES edge) / `expire`
+- `lorien debt` CLI — tabular display with `--min-confidence`, `--min-age` flags
+- `lorien debt --review` — interactive per-fact confirmation loop
+
+**Belief Fork** (`lorien forks`)
+- `GraphStore.find_belief_forks()` — detects when different agents hold diverging beliefs about the same subject+predicate
+- Severity classification: `critical` (CONTRADICTS edge exists), `warning` (freshness gap > 30 days), `info`
+- `LorienMemory.get_belief_forks()` — convenience wrapper with `only_critical` filter
+- `lorien forks` CLI — grouped by severity, `--critical-only` flag
+
+**Consequence Simulation** (`lorien simulate`)
+- `GraphStore.simulate_decision_impact()` — dry-run impact analysis: compatible facts, needs_update, rule_violations (read-only, never writes)
+- `LorienMemory.simulate_decision()` — returns recommendation (`proceed` / `caution` / `reconsider`), impact score, and mandatory disclaimer
+- `lorien simulate "<decision>"` CLI — full formatted output with icons
+
+**Common helpers**
+- `GraphStore.get_facts_by_subject()` — return all facts for a given subject_id with agent/timestamp metadata
+
+### Tests
+- 19 new tests in `tests/test_v04.py` → total **159 tests** (all passing)
+
+---
+
 ## [0.3.0] — 2026-03-03
 
 ### Added
