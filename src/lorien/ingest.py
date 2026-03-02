@@ -279,21 +279,26 @@ class LorienIngester:
         normalized = re.sub(r"[^\w가-힣]", "", name.lower().replace(" ", "_"))
         return f"{entity_type}:{normalized}"
 
-    def _resolve_entity(self, name: str, entity_type: str, aliases: list[str]) -> str:
+    def _resolve_entity(self, name: str, entity_type: str, aliases: list[str]) -> tuple[str, bool]:
+        """Resolve an entity by name/aliases, creating if needed.
+
+        Returns (entity_id, is_new) where is_new is True only if a new
+        Entity node was created.
+        """
         canonical = self._canonical_key(entity_type, name)
         if canonical in self._entity_cache:
-            return self._entity_cache[canonical]
+            return self._entity_cache[canonical], False
 
         existing = self.store.find_entity_by_canonical_key(canonical)
         if existing:
             self._entity_cache[canonical] = existing["id"]
-            return existing["id"]
+            return existing["id"], False
 
         for alias in [name] + aliases:
-            found = self.store.find_entity_by_alias(alias)
+            found = self.store.find_entity_by_alias(alias, entity_type=entity_type)
             if found:
                 self._entity_cache[canonical] = found["id"]
-                return found["id"]
+                return found["id"], False
 
         entity = Entity(
             name=name,
@@ -304,7 +309,7 @@ class LorienIngester:
         )
         self.store.add_entity(entity)
         self._entity_cache[canonical] = entity.id
-        return entity.id
+        return entity.id, True
 
     def _store_triples(self, triples: ExtractedTriples, source: str) -> IngestResult:
         result = IngestResult()
@@ -314,9 +319,10 @@ class LorienIngester:
             if not ent.name:
                 continue
             try:
-                entity_id = self._resolve_entity(ent.name, ent.entity_type, ent.aliases)
+                entity_id, is_new = self._resolve_entity(ent.name, ent.entity_type, ent.aliases)
                 name_to_id[ent.name.lower()] = entity_id
-                result.entities_added += 1
+                if is_new:
+                    result.entities_added += 1
             except Exception as exc:
                 result.errors.append(f"entity error: {exc}")
 
