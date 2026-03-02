@@ -351,3 +351,98 @@ class LorienMemory:
     def get_contradictions(self) -> list[dict]:
         """Return detected contradictions — lorien-exclusive feature."""
         return self.graph.find_contradictions()
+
+    # ── v0.3 Temporal API ──────────────────────────────────────────────────────
+
+    def confirm(self, fact_ids: list[str]) -> int:
+        """Mark facts as recently confirmed — resets freshness to 1.0.
+
+        Use when you've verified stored facts are still accurate.
+
+        Returns:
+            Number of facts updated.
+        """
+        updated = 0
+        for fid in fact_ids:
+            try:
+                self.store.confirm_fact(fid)
+                updated += 1
+            except Exception:
+                pass
+        return updated
+
+    def get_fact_history(self, entity_name: str, predicate: str | None = None) -> list[dict]:
+        """Return the version history of facts for an entity.
+
+        Shows how knowledge has evolved over time (SUPERSEDES chain).
+
+        Returns:
+            List of facts ordered by created_at, newest first.
+            Each dict includes freshness_score.
+        """
+        from .temporal import freshness_score as _freshness
+
+        entity = self.graph.get_entity(entity_name)
+        if not entity:
+            return []
+
+        pred_clause = ""
+        if predicate:
+            safe_pred = predicate.replace("'", "\\'")
+            pred_clause = f"AND f.predicate CONTAINS '{safe_pred}' "
+
+        rows = self.store.query(
+            f"MATCH (f:Fact)-[:ABOUT]->(e:Entity {{id:'{entity['id']}'}}) "
+            f"WHERE f.subject_id = '{entity['id']}' {pred_clause}"
+            f"RETURN f.id, f.text, f.status, f.created_at, f.last_confirmed, "
+            f"f.confidence, f.version "
+            f"ORDER BY f.created_at DESC LIMIT 50"
+        )
+
+        results = []
+        for row in rows:
+            fid, text, status, created, confirmed, conf, version = row
+            results.append({
+                "id": fid,
+                "text": text,
+                "status": status,
+                "created_at": created or "",
+                "last_confirmed": confirmed or "",
+                "confidence": conf or 0.0,
+                "version": version or 1,
+                "freshness_score": _freshness(confirmed or created or ""),
+            })
+        return results
+
+    def cleanup(
+        self,
+        max_age_days: int = 90,
+        min_confidence: float = 0.3,
+    ) -> dict:
+        """Expire stale facts that haven't been confirmed recently.
+
+        A fact is expired when:
+        - Age since last_confirmed > max_age_days AND
+        - confidence < min_confidence
+
+        Returns:
+            {"expired": int} — number of facts expired.
+        """
+        expired = self.store.expire_stale_facts(
+            max_age_days=max_age_days,
+            min_confidence=min_confidence,
+        )
+        return {"expired": expired}
+
+    def freshness(self, fact_id: str) -> float:
+        """Get the freshness score (0.0–1.0) for a specific fact."""
+        from .temporal import freshness_score as _freshness
+
+        rows = self.store.query(
+            f"MATCH (f:Fact {{id:'{fact_id}'}}) "
+            f"RETURN f.last_confirmed, f.created_at LIMIT 1"
+        )
+        if not rows:
+            return 0.0
+        confirmed, created = rows[0]
+        return _freshness(confirmed or created or "")

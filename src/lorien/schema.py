@@ -52,14 +52,18 @@ class GraphStore:
                 "id STRING, kind STRING, text STRING, fact_type STRING, "
                 "subject_id STRING, predicate STRING, object_id STRING, "
                 "valid_from STRING, valid_to STRING, negated BOOL, "
-                "created_at STRING, updated_at STRING, confidence DOUBLE, "
+                "created_at STRING, updated_at STRING, "
+                "last_confirmed STRING, expires_at STRING, version INT64, "
+                "confidence DOUBLE, "
                 "source STRING, source_ref STRING, status STRING, "
                 "PRIMARY KEY(id)"
             ),
             "Rule": (
                 "id STRING, kind STRING, text STRING, rule_type STRING, "
                 "priority INT64, "
-                "created_at STRING, updated_at STRING, confidence DOUBLE, "
+                "created_at STRING, updated_at STRING, "
+                "last_confirmed STRING, expires_at STRING, "
+                "confidence DOUBLE, "
                 "source STRING, source_ref STRING, status STRING, "
                 "PRIMARY KEY(id)"
             ),
@@ -71,6 +75,7 @@ class GraphStore:
             ("RELATED_TO",  "FROM Entity TO Entity, relation STRING"),
             ("CAUSED",      "FROM Fact TO Fact"),
             ("CONTRADICTS", "FROM Fact TO Fact"),
+            ("SUPERSEDES",  "FROM Fact TO Fact, reason STRING, created_at STRING"),
         ]
 
         for table_name, columns in node_ddl.items():
@@ -122,6 +127,8 @@ class GraphStore:
             f"object_id:{self._q(fact.object_id)}, valid_from:{self._q(fact.valid_from)}, "
             f"valid_to:{self._q(fact.valid_to)}, negated:{negated_str}, "
             f"created_at:{self._q(fact.created_at)}, updated_at:{self._q(fact.updated_at)}, "
+            f"last_confirmed:{self._q(fact.last_confirmed)}, "
+            f"expires_at:{self._q(fact.expires_at)}, version:{fact.version}, "
             f"confidence:{fact.confidence}, source:{self._q(fact.source)}, "
             f"source_ref:{self._q(fact.source_ref)}, status:{self._q(fact.status)}"
             f"}})"
@@ -135,6 +142,8 @@ class GraphStore:
             f"text:{self._q(rule.text)}, rule_type:{self._q(rule.rule_type)}, "
             f"priority:{rule.priority}, "
             f"created_at:{self._q(rule.created_at)}, updated_at:{self._q(rule.updated_at)}, "
+            f"last_confirmed:{self._q(rule.last_confirmed)}, "
+            f"expires_at:{self._q(rule.expires_at)}, "
             f"confidence:{rule.confidence}, source:{self._q(rule.source)}, "
             f"source_ref:{self._q(rule.source_ref)}, status:{self._q(rule.status)}"
             f"}})"
@@ -179,6 +188,102 @@ class GraphStore:
             f"(b:Fact {{id:{self._q(fact_id_b)}}}) "
             f"CREATE (a)-[:CONTRADICTS]->(b)"
         )
+
+    def add_supersedes(
+        self, new_fact_id: str, old_fact_id: str, reason: str = "temporal_update"
+    ) -> None:
+        """Create SUPERSEDES edge: (new Fact)-[:SUPERSEDES]->(old Fact).
+
+        Marks the old fact as superseded.
+        """
+        from datetime import datetime, timezone
+        now = datetime.now(timezone.utc).isoformat()
+        self.conn.execute(
+            f"MATCH (a:Fact {{id:{self._q(new_fact_id)}}}), "
+            f"(b:Fact {{id:{self._q(old_fact_id)}}}) "
+            f"CREATE (a)-[:SUPERSEDES {{reason:{self._q(reason)}, created_at:{self._q(now)}}}]->(b)"
+        )
+        # Mark old fact as superseded
+        self.conn.execute(
+            f"MATCH (f:Fact {{id:{self._q(old_fact_id)}}}) "
+            f"SET f.status = 'superseded'"
+        )
+
+    def confirm_fact(self, fact_id: str) -> None:
+        """Update last_confirmed timestamp to now."""
+        from datetime import datetime, timezone
+        now = datetime.now(timezone.utc).isoformat()
+        self.conn.execute(
+            f"MATCH (f:Fact {{id:{self._q(fact_id)}}}) "
+            f"SET f.last_confirmed = {self._q(now)}, f.updated_at = {self._q(now)}"
+        )
+
+    def confirm_rule(self, rule_id: str) -> None:
+        """Update last_confirmed timestamp to now."""
+        from datetime import datetime, timezone
+        now = datetime.now(timezone.utc).isoformat()
+        self.conn.execute(
+            f"MATCH (r:Rule {{id:{self._q(rule_id)}}}) "
+            f"SET r.last_confirmed = {self._q(now)}, r.updated_at = {self._q(now)}"
+        )
+
+    def expire_stale_facts(self, max_age_days: int = 90, min_confidence: float = 0.3) -> int:
+        """Mark stale facts as expired. Returns count of expired facts."""
+        from datetime import datetime, timezone, timedelta
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=max_age_days)).isoformat()
+        rows = self._rows(
+            f"MATCH (f:Fact) WHERE f.status = 'active' "
+            f"AND f.last_confirmed < {self._q(cutoff)} "
+            f"AND f.confidence < {min_confidence} "
+            f"RETURN f.id"
+        )
+        for row in rows:
+            self.conn.execute(
+                f"MATCH (f:Fact {{id:{self._q(row[0])}}}) SET f.status = 'expired'"
+            )
+        return len(rows)
+
+    def migrate_v02_to_v03(self) -> dict:
+        """Add v0.3 temporal fields to existing v0.2 nodes (in-place migration).
+
+        Safe to run multiple times (idempotent).
+        Returns counts of migrated nodes.
+        """
+        from datetime import datetime, timezone
+        now = datetime.now(timezone.utc).isoformat()
+
+        # Migrate Facts: set last_confirmed = created_at, expires_at = '', version = 1
+        # where last_confirmed is missing (old format has no last_confirmed field)
+        try:
+            fact_rows = self._rows(
+                "MATCH (f:Fact) WHERE f.last_confirmed IS NULL OR f.last_confirmed = '' "
+                "RETURN f.id, f.created_at"
+            )
+            for fid, created_at in fact_rows:
+                confirmed = created_at if created_at else now
+                self.conn.execute(
+                    f"MATCH (f:Fact {{id:{self._q(fid)}}}) "
+                    f"SET f.last_confirmed = {self._q(confirmed)}, "
+                    f"f.expires_at = '', f.version = 1"
+                )
+        except Exception:
+            fact_rows = []
+
+        try:
+            rule_rows = self._rows(
+                "MATCH (r:Rule) WHERE r.last_confirmed IS NULL OR r.last_confirmed = '' "
+                "RETURN r.id, r.created_at"
+            )
+            for rid, created_at in rule_rows:
+                confirmed = created_at if created_at else now
+                self.conn.execute(
+                    f"MATCH (r:Rule {{id:{self._q(rid)}}}) "
+                    f"SET r.last_confirmed = {self._q(confirmed)}, r.expires_at = ''"
+                )
+        except Exception:
+            rule_rows = []
+
+        return {"facts_migrated": len(fact_rows), "rules_migrated": len(rule_rows)}
 
     def find_entity_by_canonical_key(self, canonical_key: str) -> dict | None:
         rows = self._rows(

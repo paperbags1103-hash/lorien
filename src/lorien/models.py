@@ -51,6 +51,9 @@ class Fact:
     negated: bool = False
     created_at: str = field(default_factory=_now)
     updated_at: str = field(default_factory=_now)
+    last_confirmed: str = field(default_factory=_now)
+    expires_at: str = ""   # empty = never expires
+    version: int = 1
     confidence: float = 1.0
     source: str = ""
     source_ref: str = ""
@@ -66,6 +69,8 @@ class Rule:
     priority: int = 50
     created_at: str = field(default_factory=_now)
     updated_at: str = field(default_factory=_now)
+    last_confirmed: str = field(default_factory=_now)
+    expires_at: str = ""   # empty = never expires
     confidence: float = 1.0
     source: str = ""
     source_ref: str = ""
