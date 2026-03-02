@@ -1,4 +1,5 @@
 from .ingest import LorienIngester
+from .memory import LorienMemory
 from .models import Entity, Fact, Rule
 from .query import KnowledgeGraph
 from .schema import GraphStore
@@ -10,4 +11,5 @@ __all__ = [
     "GraphStore",
     "KnowledgeGraph",
     "LorienIngester",
+    "LorienMemory",
 ]

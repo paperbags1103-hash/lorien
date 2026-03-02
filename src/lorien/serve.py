@@ -145,33 +145,43 @@ class _Handler(BaseHTTPRequestHandler):
 
     def _graph_json(self) -> bytes:
         store = self.__class__.store
-        nodes = []
-        edges = []
 
-        # Entities with fact/rule counts
-        rows = store.query(
-            "MATCH (e:Entity) RETURN e.id, e.name, e.entity_type, e.status"
+        # Aggregate: entities + fact count in one pass
+        entity_rows = store.query(
+            "MATCH (e:Entity) WHERE e.status = 'active' "
+            "RETURN e.id, e.name, e.entity_type"
         )
+        # Fact counts per entity
+        fact_counts: dict[str, int] = {}
+        for row in store.query(
+            "MATCH (f:Fact)-[:ABOUT]->(e:Entity) WHERE e.status = 'active' "
+            "RETURN e.id, count(f)"
+        ):
+            fact_counts[row[0]] = row[1]
+
+        # Rule counts per entity
+        rule_counts: dict[str, int] = {}
+        for row in store.query(
+            "MATCH (e:Entity)-[:HAS_RULE]->(r:Rule) WHERE e.status = 'active' "
+            "RETURN e.id, count(r)"
+        ):
+            rule_counts[row[0]] = row[1]
+
+        nodes = []
         entity_ids = set()
-        for row in rows:
-            eid, name, etype, status = row
-            if status != "active":
-                continue
+        for eid, name, etype in entity_rows:
             entity_ids.add(eid)
-            # count facts
-            fc = list(store.query(f"MATCH (f:Fact)-[:ABOUT]->(e:Entity {{id:'{eid}'}}) RETURN count(f)"))
-            rc = list(store.query(f"MATCH (e:Entity {{id:'{eid}'}})-[:HAS_RULE]->(r:Rule) RETURN count(r)"))
             nodes.append({
                 "id": eid, "name": name, "entity_type": etype,
-                "fact_count": fc[0][0] if fc else 0,
-                "rule_count": rc[0][0] if rc else 0,
+                "fact_count": fact_counts.get(eid, 0),
+                "rule_count": rule_counts.get(eid, 0),
             })
 
         # RELATED_TO edges
-        rel_rows = store.query(
+        edges = []
+        for row in store.query(
             "MATCH (a:Entity)-[r:RELATED_TO]->(b:Entity) RETURN a.id, b.id, r.relation"
-        )
-        for row in rel_rows:
+        ):
             src, tgt, rel = row
             if src in entity_ids and tgt in entity_ids:
                 edges.append({"from": src, "to": tgt, "relation": rel or ""})
@@ -228,9 +238,9 @@ def serve(db_path: str = "~/.lorien/db", port: int = 7331) -> None:
     store = GraphStore(db_path=db_path)
     _Handler.store = store
 
-    print(f"🌳 lorien serve → http://127.0.0.1:{port}")
-    print("   Ctrl+C to stop")
     httpd = HTTPServer(("127.0.0.1", port), _Handler)
+    print(f"🌳 lorien serve → http://127.0.0.1:{port}")
+    print("   Ctrl+C to stop", flush=True)
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:
