@@ -134,6 +134,15 @@ def sync(to_md: str, entity: str | None, db: str) -> None:
 
 @main.command()
 @click.option("--db", default=DEFAULT_DB, show_default=True)
+@click.option("--port", default=7331, show_default=True)
+def serve(db: str, port: int) -> None:
+    """Launch local web graph viewer at http://127.0.0.1:PORT."""
+    from .serve import serve as _serve
+    _serve(db_path=db, port=port)
+
+
+@main.command()
+@click.option("--db", default=DEFAULT_DB, show_default=True)
 def contradictions(db: str) -> None:
     """List all detected contradictions."""
     store = GraphStore(db_path=db)
