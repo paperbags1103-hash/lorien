@@ -189,6 +189,126 @@ def serve(db: str, port: int) -> None:
 
 @main.command()
 @click.option("--db", default=DEFAULT_DB, show_default=True)
+@click.option("--min-confidence", default=0.7, show_default=True, help="Min confidence threshold")
+@click.option("--min-age", default=60.0, show_default=True, help="Min age in days")
+@click.option("--review", is_flag=True, help="Interactive review mode")
+def debt(db: str, min_confidence: float, min_age: float, review: bool) -> None:
+    """Show epistemic debt — facts assumed without re-verification."""
+    from .memory import LorienMemory
+    mem = LorienMemory(db_path=db, enable_vectors=False)
+    items = mem.get_epistemic_debt(
+        min_confidence=min_confidence,
+        min_age_days=min_age,
+    )
+    if not items:
+        click.echo("✓ No epistemic debt found.")
+        return
+
+    click.echo(f"\n📋 Epistemic Debt — {len(items)} unverified high-confidence facts\n")
+    click.echo(f"  {'score':>6}  {'age':>8}  {'conf':>5}  fact")
+    click.echo("  " + "─" * 68)
+    for item in items:
+        subj = f"[{item['subject_name']}] " if item['subject_name'] else ""
+        click.echo(
+            f"  {item['debt_score']:>6.2f}  "
+            f"{item['age_days']:>5.0f}d  "
+            f"{item['confidence']:>5.2f}  "
+            f"{subj}{item['fact_text'][:60]}"
+        )
+
+    if review:
+        click.echo("\n─── Interactive Review ───\n")
+        for item in items:
+            click.echo(f"❓ \"{item['fact_text']}\"")
+            click.echo(f"   Age: {item['age_days']:.0f} days  Confidence: {item['confidence']:.2f}")
+            choice = click.prompt("   [c]onfirm / [u]pdate / [e]xpire / [s]kip", default="s")
+            if choice == "c":
+                mem.review_debt(item["fact_id"], "confirm")
+                click.echo("   ✓ Confirmed. Freshness reset.")
+            elif choice == "u":
+                new_text = click.prompt("   New value")
+                result = mem.review_debt(item["fact_id"], "update", new_text=new_text)
+                click.echo(f"   ✓ Updated → new fact id: {result['new_fact_id']}")
+            elif choice == "e":
+                mem.review_debt(item["fact_id"], "expire")
+                click.echo("   ✓ Expired.")
+            else:
+                click.echo("   → Skipped.")
+    else:
+        click.echo(f"\n  Run 'lorien debt --review' for interactive confirmation.")
+
+
+@main.command()
+@click.option("--db", default=DEFAULT_DB, show_default=True)
+@click.option("--critical-only", is_flag=True, help="Show only CRITICAL forks")
+def forks(db: str, critical_only: bool) -> None:
+    """Show belief forks — where different agents hold diverging views."""
+    from .memory import LorienMemory
+    mem = LorienMemory(db_path=db, enable_vectors=False)
+    items = mem.get_belief_forks(only_critical=critical_only)
+
+    if not items:
+        click.echo("✓ No belief forks detected.")
+        return
+
+    severity_icon = {"critical": "⛔", "warning": "⚠️ ", "info": "ℹ️ "}
+    by_severity: dict = {"critical": [], "warning": [], "info": []}
+    for item in items:
+        by_severity[item["severity"]].append(item)
+
+    click.echo(f"\n🔀 Belief Forks — {len(items)} detected\n")
+    for severity in ("critical", "warning", "info"):
+        group = by_severity[severity]
+        if not group:
+            continue
+        icon = severity_icon[severity]
+        click.echo(f"{icon} {severity.upper()} ({len(group)})")
+        for fork in group:
+            click.echo(f"  Subject: {fork['subject_name']} / predicate: {fork['predicate']}")
+            for f in fork["forks"]:
+                age = f"{fork['days_since_oldest']:.0f}d" if fork['days_since_oldest'] else "?"
+                click.echo(
+                    f"    ├─ [{f['agent_id']}]  "
+                    f"conf:{f['confidence']:.2f}  "
+                    f"\"{f['fact_text'][:50]}\""
+                )
+            click.echo("")
+
+
+@main.command()
+@click.argument("decision_text")
+@click.option("--db", default=DEFAULT_DB, show_default=True)
+def simulate(decision_text: str, db: str) -> None:
+    """Simulate adding a decision — see impact before committing."""
+    from .memory import LorienMemory
+    mem = LorienMemory(db_path=db, enable_vectors=False)
+
+    click.echo(f"\n🔮 Simulation: \"{decision_text}\"\n")
+    click.echo("Analyzing graph...")
+
+    result = mem.simulate_decision(decision_text)
+
+    click.echo(f"\n✅ Compatible: {result['compatible_facts']} facts")
+
+    if result["needs_update"]:
+        click.echo(f"⚠️  Needs review ({len(result['needs_update'])}):")
+        for item in result["needs_update"]:
+            click.echo(f"    - {item['text'][:60]}")
+
+    if result["rule_violations"]:
+        click.echo(f"❌ Rule violations ({len(result['rule_violations'])}):")
+        for r in result["rule_violations"]:
+            click.echo(f"    - [priority: {r['priority']}] {r['text'][:60]}")
+
+    rec_icon = {"proceed": "✅", "caution": "⚠️ ", "reconsider": "❌"}
+    icon = rec_icon.get(result["recommendation"], "?")
+    click.echo(f"\nImpact score: {result['impact_score']:.2f}")
+    click.echo(f"Recommendation: {icon} {result['recommendation'].upper()}")
+    click.echo(f"\n⚠️  {result['disclaimer']}")
+
+
+@main.command()
+@click.option("--db", default=DEFAULT_DB, show_default=True)
 def contradictions(db: str) -> None:
     """List all detected contradictions."""
     store = GraphStore(db_path=db)

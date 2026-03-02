@@ -507,6 +507,269 @@ class GraphStore:
 
         return {"facts_migrated": len(fact_rows), "rules_migrated": len(rule_rows)}
 
+    # ── v0.4 Common helpers ───────────────────────────────────────────────────
+
+    def get_facts_by_subject(
+        self,
+        subject_id: str,
+        status: str = "active",
+        limit: int = 100,
+    ) -> list[dict]:
+        """Return all facts about a subject, with agent_id and timestamps."""
+        rows = self._rows(
+            f"MATCH (f:Fact) WHERE f.subject_id = {self._q(subject_id)} "
+            f"AND f.status = {self._q(status)} "
+            f"RETURN f.id, f.text, f.predicate, f.agent_id, "
+            f"f.last_confirmed, f.confidence, f.version, f.created_at "
+            f"ORDER BY f.last_confirmed DESC LIMIT {int(limit)}"
+        )
+        return [
+            {
+                "id": r[0], "text": r[1], "predicate": r[2],
+                "agent_id": r[3], "last_confirmed": r[4],
+                "confidence": r[5], "version": r[6], "created_at": r[7],
+            }
+            for r in rows
+        ]
+
+    # ── v0.4 Epistemic Debt ───────────────────────────────────────────────────
+
+    def get_epistemic_debt(
+        self,
+        min_confidence: float = 0.7,
+        min_age_days: float = 60.0,
+        only_version_one: bool = True,
+        limit: int = 50,
+    ) -> list[dict]:
+        """Return facts that are old, high-confidence, and never re-confirmed.
+
+        Debt score = confidence * age_days / 365.
+        Higher score = "been assumed longer without verification".
+        """
+        from datetime import datetime, timezone, timedelta
+        from .temporal import age_in_days
+
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=min_age_days)).isoformat()
+        version_clause = "AND f.version = 1 " if only_version_one else ""
+
+        rows = self._rows(
+            f"MATCH (f:Fact) WHERE f.status = 'active' "
+            f"AND f.confidence >= {float(min_confidence)} "
+            f"AND f.last_confirmed < {self._q(cutoff)} "
+            f"{version_clause}"
+            f"RETURN f.id, f.text, f.subject_id, f.confidence, "
+            f"f.last_confirmed, f.version, f.agent_id, f.created_at "
+            f"LIMIT {int(limit)}"
+        )
+
+        results = []
+        for r in rows:
+            fid, text, subject_id, conf, confirmed, version, agent_id, created = r
+            a_days = age_in_days(confirmed or created or "")
+            debt_score = float(conf or 0) * a_days / 365.0
+
+            # Try to get subject name
+            subject_name = subject_id or ""
+            if subject_id:
+                ent = self._rows(
+                    f"MATCH (e:Entity {{id:{self._q(subject_id)}}}) RETURN e.name LIMIT 1"
+                )
+                if ent:
+                    subject_name = ent[0][0]
+
+            results.append({
+                "fact_id": fid,
+                "fact_text": text,
+                "subject_id": subject_id or "",
+                "subject_name": subject_name,
+                "confidence": float(conf or 0),
+                "age_days": round(a_days, 1),
+                "version": int(version or 1),
+                "agent_id": agent_id or "default",
+                "last_confirmed": confirmed or "",
+                "debt_score": round(debt_score, 3),
+            })
+
+        results.sort(key=lambda x: x["debt_score"], reverse=True)
+        return results
+
+    # ── v0.4 Belief Fork ─────────────────────────────────────────────────────
+
+    def find_belief_forks(
+        self,
+        min_agents: int = 2,
+        only_critical: bool = False,
+    ) -> list[dict]:
+        """Find subjects where different agents hold diverging beliefs.
+
+        A fork exists when the same subject+predicate has facts from
+        different agents that contradict each other or have large freshness gaps.
+        """
+        from .temporal import age_in_days
+
+        # Get all active facts grouped by subject_id + predicate
+        rows = self._rows(
+            "MATCH (f:Fact) WHERE f.status = 'active' "
+            "AND f.subject_id <> '' AND f.predicate <> '' AND f.agent_id <> '' "
+            "RETURN f.subject_id, f.predicate, f.agent_id, "
+            "f.id, f.text, f.last_confirmed, f.confidence "
+            "ORDER BY f.subject_id, f.predicate"
+        )
+
+        # Group by (subject_id, predicate)
+        from collections import defaultdict
+        groups: dict = defaultdict(list)
+        for subject_id, predicate, agent_id, fid, text, confirmed, conf in rows:
+            key = (subject_id or "", predicate or "")
+            groups[key].append({
+                "agent_id": agent_id or "default",
+                "fact_id": fid,
+                "fact_text": text,
+                "last_confirmed": confirmed or "",
+                "confidence": float(conf or 0),
+            })
+
+        forks = []
+        for (subject_id, predicate), facts in groups.items():
+            # Only consider when multiple agents have facts
+            agent_ids = {f["agent_id"] for f in facts}
+            if len(agent_ids) < min_agents:
+                continue
+
+            # Check for CONTRADICTS edges between any two facts in this group
+            fact_ids = [f["fact_id"] for f in facts]
+            has_contradiction = False
+            for i, fid_a in enumerate(fact_ids):
+                for fid_b in fact_ids[i + 1:]:
+                    cont = self._rows(
+                        f"MATCH (a:Fact {{id:{self._q(fid_a)}}})-[:CONTRADICTS]-(b:Fact {{id:{self._q(fid_b)}}}) "
+                        f"RETURN count(*) LIMIT 1"
+                    )
+                    if cont and int(cont[0][0]) > 0:
+                        has_contradiction = True
+                        break
+                if has_contradiction:
+                    break
+
+            # Check freshness gap
+            ages = [age_in_days(f["last_confirmed"]) for f in facts if f["last_confirmed"]]
+            freshness_gap = (max(ages) - min(ages)) if len(ages) >= 2 else 0.0
+
+            if has_contradiction:
+                severity = "critical"
+            elif freshness_gap > 30:
+                severity = "warning"
+            else:
+                severity = "info"
+
+            if only_critical and severity != "critical":
+                continue
+
+            # Resolve subject name
+            subject_name = subject_id
+            if subject_id:
+                ent = self._rows(
+                    f"MATCH (e:Entity {{id:{self._q(subject_id)}}}) RETURN e.name LIMIT 1"
+                )
+                if ent:
+                    subject_name = ent[0][0]
+
+            forks.append({
+                "subject_id": subject_id,
+                "subject_name": subject_name,
+                "predicate": predicate,
+                "forks": facts,
+                "severity": severity,
+                "days_since_oldest": round(max(ages) if ages else 0.0, 1),
+                "has_contradiction": has_contradiction,
+                "freshness_gap_days": round(freshness_gap, 1),
+            })
+
+        # Sort: critical first, then by freshness gap
+        severity_order = {"critical": 0, "warning": 1, "info": 2}
+        forks.sort(key=lambda x: (severity_order[x["severity"]], -x["freshness_gap_days"]))
+        return forks
+
+    # ── v0.4 Consequence Simulation ───────────────────────────────────────────
+
+    def simulate_decision_impact(
+        self,
+        decision_text: str,
+        supporting_fact_ids: list[str] | None = None,
+    ) -> dict:
+        """Simulate adding a decision without writing to graph (read-only).
+
+        Returns impact analysis: compatible facts, needs_update, rule_violations.
+        """
+        from .contradiction import ContradictionDetector
+        from .models import Fact as FactModel
+
+        # Find related facts via subject overlap from supporting_fact_ids
+        related_facts = []
+        if supporting_fact_ids:
+            for fid in supporting_fact_ids:
+                rows = self._rows(
+                    f"MATCH (f:Fact {{id:{self._q(fid)}}})-[:ABOUT]->(e:Entity)"
+                    f"<-[:ABOUT]-(other:Fact) WHERE other.status = 'active' "
+                    f"RETURN other.id, other.text, other.confidence LIMIT 20"
+                )
+                for rid, rtext, rconf in rows:
+                    if rid not in {f["id"] for f in related_facts}:
+                        related_facts.append({"id": rid, "text": rtext, "confidence": float(rconf or 0)})
+
+        # Find rule violations by text matching
+        rule_rows = self._rows(
+            "MATCH (r:Rule) WHERE r.status = 'active' AND r.priority >= 50 "
+            "RETURN r.id, r.text, r.priority, r.rule_type LIMIT 100"
+        )
+
+        rule_violations = []
+        decision_lower = decision_text.lower()
+        for rid, rtext, priority, rtype in rule_rows:
+            # Simple heuristic: prohibition rules that might apply
+            if rtype in ("prohibition", "fixed") and rtext:
+                # Check if any key words overlap
+                rule_words = set(rtext.lower().split())
+                decision_words = set(decision_lower.split())
+                overlap = rule_words & decision_words
+                if len(overlap) >= 2:  # at least 2 words in common
+                    rule_violations.append({
+                        "id": rid,
+                        "text": rtext,
+                        "priority": int(priority or 50),
+                    })
+
+        # Needs update: supporting facts that are old/stale
+        needs_update = []
+        for f in related_facts[:10]:
+            needs_update.append({"id": f["id"], "text": f["text"], "reason": "related fact may need review"})
+
+        # Compatible count = total active facts minus violations and needs_update
+        total_facts = self._rows("MATCH (f:Fact) WHERE f.status = 'active' RETURN count(f)")
+        total = int(total_facts[0][0]) if total_facts else 0
+        compatible = max(0, total - len(needs_update) - len(rule_violations))
+
+        # Impact score
+        impact = min(1.0, (len(rule_violations) * 0.3 + len(needs_update) * 0.05))
+        if impact < 0.2:
+            recommendation = "proceed"
+        elif impact < 0.5:
+            recommendation = "caution"
+        else:
+            recommendation = "reconsider"
+
+        return {
+            "decision": {"text": decision_text},
+            "compatible_facts": compatible,
+            "needs_update": needs_update[:5],
+            "rule_violations": rule_violations[:5],
+            "superseded_decisions": [],
+            "impact_score": round(impact, 2),
+            "recommendation": recommendation,
+            "confidence": round(min(1.0, total / max(1, total + 10)), 2),
+            "disclaimer": "Based on known facts only. Unknown facts may change the outcome.",
+        }
+
     def find_entity_by_canonical_key(self, canonical_key: str) -> dict | None:
         rows = self._rows(
             f"MATCH (e:Entity) WHERE e.canonical_key = {self._q(canonical_key)} "
