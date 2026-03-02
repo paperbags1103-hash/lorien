@@ -17,6 +17,8 @@ dependencies = [
 
 [project.optional-dependencies]
 llm = ["openai>=1.0"]
+vectors = ["sentence-transformers>=2.7.0", "numpy>=1.24"]
+all = ["openai>=1.0", "sentence-transformers>=2.7.0", "numpy>=1.24"]
 dev = ["pytest>=8.0"]
 
 [project.scripts]

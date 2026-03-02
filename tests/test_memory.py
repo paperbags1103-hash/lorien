@@ -9,9 +9,9 @@ from lorien.schema import GraphStore
 
 @pytest.fixture
 def mem(tmp_path):
-    """LorienMemory backed by a fresh temp DB (no LLM)."""
+    """LorienMemory backed by a fresh temp DB (no LLM, no vectors for speed)."""
     db = str(tmp_path / "mem_test")
-    return LorienMemory(db_path=db)
+    return LorienMemory(db_path=db, enable_vectors=False)
 
 
 MESSAGES = [
