@@ -57,9 +57,14 @@ def ingest(
     """
     from .ingest import LorienIngester
 
+    # Let LorienIngester auto-detect OpenClaw gateway; only fail if explicitly needed
     if model and not api_key:
-        click.echo("⚠ --model set but no API key found (set ANTHROPIC_API_KEY)", err=True)
-        sys.exit(1)
+        from .ingest import _read_openclaw_gateway
+        if not _read_openclaw_gateway():
+            click.echo("⚠ --model set but no API key found (set ANTHROPIC_API_KEY or configure OpenClaw gateway)", err=True)
+            sys.exit(1)
+        if verbose:
+            click.echo("→ Using OpenClaw gateway")
 
     store = GraphStore(db_path=db)
     ingester = LorienIngester(store, llm_model=model, api_key=api_key, base_url=base_url)
