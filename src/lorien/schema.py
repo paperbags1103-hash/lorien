@@ -81,8 +81,10 @@ class GraphStore:
             if rel_name not in existing:
                 self.conn.execute(f"CREATE REL TABLE {rel_name}({spec})")
 
-    def _q(self, value: str) -> str:
+    def _q(self, value: str | None) -> str:
         """Escape a string value for safe embedding in a Cypher literal."""
+        if value is None:
+            return "''"
         value = value.replace("\\", "\\\\")
         value = value.replace("'", "\\'")
         return f"'{value}'"
@@ -185,11 +187,12 @@ class GraphStore:
         )
         return {"id": rows[0][0], "name": rows[0][1], "canonical_key": rows[0][2]} if rows else None
 
-    def find_entity_by_alias(self, alias: str) -> dict | None:
+    def find_entity_by_alias(self, alias: str, entity_type: str | None = None) -> dict | None:
+        type_clause = f"AND e.entity_type = {self._q(entity_type)} " if entity_type else ""
         rows = self._rows(
-            f"MATCH (e:Entity) WHERE e.status = 'active' "
+            f"MATCH (e:Entity) WHERE e.status = 'active' {type_clause}"
             f"AND (lower(e.name) = {self._q(alias.lower())} "
-            f"OR e.aliases CONTAINS {self._q(alias)}) "
+            f"OR (',' + e.aliases + ',') CONTAINS (',' + {self._q(alias)} + ',')) "
             f"RETURN e.id, e.name, e.canonical_key LIMIT 1"
         )
         return {"id": rows[0][0], "name": rows[0][1], "canonical_key": rows[0][2]} if rows else None
