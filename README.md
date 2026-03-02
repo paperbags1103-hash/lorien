@@ -234,6 +234,17 @@ lorien memory alice
 
 # Web visualization (vis.js, no extra deps)
 lorien serve
+
+# v0.4 — Epistemic Debt: facts assumed too long without verification
+lorien debt
+lorien debt --review          # interactive confirm / update / expire
+
+# v0.4 — Belief Fork: where different agents hold diverging views
+lorien forks
+lorien forks --critical-only
+
+# v0.4 — Consequence Simulation: impact check before committing
+lorien simulate "Switch to remote work"
 ```
 
 ---

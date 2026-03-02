@@ -24,8 +24,4 @@ __all__ = [
     "classify_temporal_relation",
     "freshness_score",
     "is_stale",
-    # v0.4
-    "get_epistemic_debt",
-    "get_belief_forks",
-    "simulate_decision",
 ]
