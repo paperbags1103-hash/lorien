@@ -368,12 +368,10 @@ class LorienIngester:
                 target_id = name_to_id.get(relation.target.lower())
                 if not source_id or not target_id:
                     continue
-                if relation.rel_type == "RELATED_TO":
-                    self.store.add_related_to(source_id, target_id, relation.rel_type.lower())
-                elif relation.rel_type == "CAUSED":
-                    self.store.add_related_to(source_id, target_id, relation.rel_type.lower())
-                elif relation.rel_type == "CONTRADICTS":
-                    self.store.add_related_to(source_id, target_id, relation.rel_type.lower())
+                # CAUSED/CONTRADICTS are Fact→Fact edges but LLM returns Entity names.
+                # v0.1: encode semantic type in RELATED_TO.relation property.
+                relation_label = relation.rel_type.lower()  # "caused", "contradicts", "related_to"
+                self.store.add_related_to(source_id, target_id, relation_label)
                 result.edges_added += 1
             except Exception as exc:
                 result.errors.append(f"relation error: {exc}")
