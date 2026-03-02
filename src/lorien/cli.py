@@ -43,9 +43,11 @@ def status(db: str) -> None:
               help="API key (reads ANTHROPIC_API_KEY or LORIEN_API_KEY from env)")
 @click.option("--base-url", default=None, envvar="LORIEN_LLM_BASE_URL")
 @click.option("--verbose", "-v", is_flag=True, default=False)
+@click.option("--batch", default=1, show_default=True,
+              help="Sections per LLM call (>1 reduces API calls, use 3-5)")
 def ingest(
     file: str, db: str, model: str | None, api_key: str | None,
-    base_url: str | None, verbose: bool
+    base_url: str | None, verbose: bool, batch: int
 ) -> None:
     """Ingest a text or MEMORY.md file.
 
@@ -53,7 +55,7 @@ def ingest(
     Without --model: keyword fallback (rules only).
 
     Example:
-      lorien ingest MEMORY.md --model claude-haiku-3-5
+      lorien ingest MEMORY.md --model haiku --batch 4
     """
     from .ingest import LorienIngester
 
@@ -74,7 +76,7 @@ def ingest(
 
     filename = Path(file).name
     if filename.upper().startswith("MEMORY") and file.endswith(".md"):
-        result = ingester.ingest_memory_md(file, verbose=verbose)
+        result = ingester.ingest_memory_md(file, verbose=verbose, batch_size=batch)
     else:
         text = Path(file).read_text(encoding="utf-8")
         result = ingester.ingest_text(text, source=file)

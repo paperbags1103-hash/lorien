@@ -163,7 +163,9 @@ class LorienIngester:
             triples = self._keyword_extract(text)
         return self._store_triples(triples, source)
 
-    def ingest_memory_md(self, path: str, verbose: bool = False) -> IngestResult:
+    def ingest_memory_md(
+        self, path: str, verbose: bool = False, batch_size: int = 1
+    ) -> IngestResult:
         content = Path(path).read_text(encoding="utf-8")
         result = IngestResult()
         lines = content.split("\n")
@@ -181,17 +183,40 @@ class LorienIngester:
         if current_lines:
             sections.append((current_header, current_lines))
 
-        total = len([s for s in sections if "\n".join(s[1]).strip()])
+        # Filter empty sections
+        filled = [(h, ln) for h, ln in sections if "\n".join(ln).strip()]
+        total = len(filled)
+
+        # Process in batches (reduces LLM API calls)
+        batches: list[list[tuple[str, list[str]]]] = []
+        for i in range(0, total, batch_size):
+            batches.append(filled[i : i + batch_size])
+
         done = 0
-        for header, sec_lines in sections:
-            body = "\n".join(sec_lines).strip()
+        for batch in batches:
+            if batch_size == 1:
+                header, sec_lines = batch[0]
+                done += 1
+                if verbose and self.llm_model:
+                    print(f"  [{done}/{total}] {header[:50]}", flush=True)
+                body = "\n".join(sec_lines).strip()
+                source = f"MEMORY.md:{header}"
+            else:
+                headers = [b[0] for b in batch]
+                done += len(batch)
+                if verbose and self.llm_model:
+                    first, last = headers[0][:30], headers[-1][:30]
+                    print(f"  [batch {done}/{total}] {first} … {last}", flush=True)
+                parts = [
+                    f"## {h}\n" + "\n".join(lines_)
+                    for h, lines_ in batch
+                ]
+                body = "\n\n".join(parts).strip()
+                source = "MEMORY.md:" + ",".join(headers[:2])
+
             if not body:
                 continue
-            done += 1
-            if verbose and self.llm_model:
-                print(f"  [{done}/{total}] {header[:50]}", flush=True)
-            section_source = f"MEMORY.md:{header}"
-            current = self.ingest_text(body, source=section_source)
+            current = self.ingest_text(body, source=source)
             result.entities_added += current.entities_added
             result.facts_added += current.facts_added
             result.rules_added += current.rules_added
