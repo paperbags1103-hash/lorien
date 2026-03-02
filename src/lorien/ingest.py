@@ -105,6 +105,31 @@ Return ONLY JSON, no explanation."""
 HEADER_RE = re.compile(r"^#{1,6}\s+")
 
 
+def _read_openclaw_gateway() -> tuple[str, str] | None:
+    """Read OpenClaw gateway URL + token from ~/.openclaw/openclaw.json.
+    Returns (base_url, token) or None if not available."""
+    config_path = Path.home() / ".openclaw" / "openclaw.json"
+    if not config_path.exists():
+        return None
+    try:
+        import json as _json
+        config = _json.loads(config_path.read_text(encoding="utf-8"))
+        gw = config.get("gateway", {})
+        token = gw.get("auth", {}).get("token", "")
+        port = gw.get("port", 18789)
+        enabled = (
+            gw.get("http", {})
+            .get("endpoints", {})
+            .get("chatCompletions", {})
+            .get("enabled", False)
+        )
+        if token and enabled:
+            return f"http://127.0.0.1:{port}/v1", token
+    except Exception:
+        pass
+    return None
+
+
 class LorienIngester:
     def __init__(
         self,
@@ -112,11 +137,21 @@ class LorienIngester:
         llm_model: str | None = None,
         api_key: str | None = None,
         base_url: str | None = None,
+        use_openclaw: bool = False,
     ) -> None:
         self.store = store
         self.llm_model = llm_model
+
+        # Auto-detect OpenClaw gateway when no explicit key provided
+        if llm_model and not api_key and not base_url:
+            gw = _read_openclaw_gateway()
+            if gw:
+                base_url, api_key = gw
+                use_openclaw = True
+
         self.api_key = api_key
         self.base_url = base_url or "https://api.openai.com/v1"
+        self._use_openclaw = use_openclaw
         self._entity_cache: dict[str, str] = {}
 
     def ingest_text(self, text: str, source: str = "manual") -> IngestResult:
@@ -166,6 +201,9 @@ class LorienIngester:
 
     def _llm_extract(self, text: str) -> ExtractedTriples | None:
         try:
+            # OpenClaw gateway uses OpenAI-compatible format regardless of model alias
+            if self._use_openclaw:
+                return self._openai_extract(text)
             if self.llm_model and self.llm_model.startswith("claude"):
                 return self._anthropic_extract(text)
             return self._openai_extract(text)
@@ -203,7 +241,7 @@ class LorienIngester:
         return None
 
     def _openai_extract(self, text: str) -> ExtractedTriples | None:
-        """OpenAI-compatible API."""
+        """OpenAI-compatible API (also used for OpenClaw gateway)."""
         import urllib.request
 
         payload = json.dumps(
@@ -214,7 +252,6 @@ class LorienIngester:
                     {"role": "user", "content": USER_PROMPT.format(text=text)},
                 ],
                 "temperature": 0.1,
-                "response_format": {"type": "json_object"},
             }
         ).encode()
         request = urllib.request.Request(
@@ -225,9 +262,13 @@ class LorienIngester:
                 "Content-Type": "application/json",
             },
         )
-        with urllib.request.urlopen(request, timeout=30) as response:
+        with urllib.request.urlopen(request, timeout=60) as response:
             raw = json.loads(response.read())
         content = raw["choices"][0]["message"]["content"]
+        # Strip markdown code fences if present (some models ignore json_object hint)
+        json_match = re.search(r"\{.*\}", content, re.DOTALL)
+        if json_match:
+            return self._parse_llm_output(json.loads(json_match.group()))
         return self._parse_llm_output(json.loads(content))
 
     def _parse_llm_output(self, raw: dict[str, Any]) -> ExtractedTriples:
