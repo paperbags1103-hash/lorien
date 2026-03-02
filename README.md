@@ -18,6 +18,8 @@ lorien stores *structured knowledge* — not just flat strings. Every fact has a
 
 ---
 
+![lorien graph visualization](assets/screenshot.png)
+
 ## Quickstart
 
 ```python
