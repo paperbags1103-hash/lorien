@@ -14,7 +14,7 @@ pip install "lorien-memory[vectors]"  # + semantic search
 
 > *"Other tools tell you what the user said. lorien tells you what to believe, why, and what conflicts."*
 
-lorien stores *structured knowledge* — not just flat strings. Every fact has a source, every rule has a priority, and contradictions are detected automatically. Local, free, no server required.
+lorien stores *structured knowledge* — not just flat strings. Every fact has a source, every rule has a priority, contradictions are detected automatically, and knowledge evolves over time. Local, free, no server required.
 
 ---
 
@@ -59,55 +59,128 @@ rules = mem.get_entity_rules("alice")
 lorien uses [KuzuDB](https://kuzudb.com) — an embedded graph database (like SQLite, but for graphs).
 
 ```
-Entity ─── HAS_RULE ───► Rule
-  │
-ABOUT
-  │
-  ▼
-Fact ─── CAUSED ──► Fact
-  │
-CONTRADICTS
-  │
-  ▼
-Fact
+Agent ◄── CREATED_BY ─── Fact ─── ABOUT ───► Entity
+                           │                    │
+                       CONTRADICTS           HAS_RULE
+                           │                    │
+                           ▼                    ▼
+                          Fact               Rule
+                           │
+                       SUPERSEDES
+                           │
+                           ▼
+Decision ─── BASED_ON ──► Fact
+    │
+APPLIED_RULE ──► Rule
+    │
+DECIDED_BY ──► Agent
 ```
 
-**3 node types:**
+**5 node types:**
 - **Entity** — people, organizations, topics (`canonical_key = "type:name"`)
-- **Fact** — statements about entities (subject → predicate → object)
+- **Fact** — statements about entities (subject → predicate → object) with freshness tracking
 - **Rule** — constraints with priority 0–100 (100 = absolute prohibition)
+- **Agent** — LLM or human agent that created facts/decisions
+- **Decision** — recorded decisions with supporting evidence and causal chain
 
-**5 edge types:** `ABOUT`, `HAS_RULE`, `RELATED_TO`, `CAUSED`, `CONTRADICTS`
+**11 edge types:** `ABOUT`, `HAS_RULE`, `RELATED_TO`, `CAUSED`, `CONTRADICTS`, `SUPERSEDES`, `CREATED_BY`, `BASED_ON`, `APPLIED_RULE`, `DECIDED_BY`, `SUPERSEDES_D`
 
 ---
 
-## CLI
+## v0.3 Features
 
-```bash
-# Initialize
-lorien init
+### Temporal Tagging — Knowledge Freshness
 
-# Check status
-lorien status
+Facts age. lorien tracks how fresh each piece of knowledge is.
 
-# Ingest a file (MEMORY.md, notes, etc.)
-lorien ingest MEMORY.md
-lorien ingest MEMORY.md --model haiku   # LLM extraction via OpenClaw
+```python
+from lorien import LorienMemory, freshness_score
 
-# Query the graph
-lorien query "MATCH (e:Entity) RETURN e.name LIMIT 10"
+mem = LorienMemory()
 
-# Show entity details
-lorien show "alice"
+# Check freshness (0.0–1.0, exponential decay, half-life 30 days)
+score = mem.freshness(fact_id)      # 1.0 = confirmed today, 0.5 = 30 days ago
 
-# List contradictions
-lorien contradictions
+# Confirm facts are still accurate — resets freshness to 1.0
+mem.confirm([fact_id1, fact_id2])
 
-# Conversation memory for a user
-lorien memory alice
+# Expire stale facts (old + low confidence)
+result = mem.cleanup(max_age_days=90, min_confidence=0.3)
+# → {"expired": 12}
 
-# Web visualization (vis.js, no extra deps)
-lorien serve
+# View how a fact evolved over time
+history = mem.get_fact_history("alice", predicate="prefers")
+# → [{"text": "Prefers Python 3.12", "version": 2, "freshness_score": 0.95, ...},
+#    {"text": "Prefers Python 3.11", "version": 1, "status": "superseded", ...}]
+```
+
+Knowledge evolution (same fact updated over time) creates `SUPERSEDES` edges instead of `CONTRADICTS` — lorien distinguishes between "this is wrong" and "this changed."
+
+---
+
+### Multi-agent Shared Memory
+
+Multiple AI agents writing to the same knowledge graph, with full provenance.
+
+```python
+mem = LorienMemory()
+
+# Register agents
+mem.register_agent("claude", name="Claude Sonnet", agent_type="llm")
+mem.register_agent("codex",  name="GPT Codex",     agent_type="llm")
+
+# Each agent records knowledge under its own identity
+mem.add_with_agent(messages_from_claude, user_id="alice", agent_id="claude")
+mem.add_with_agent(messages_from_codex,  user_id="alice", agent_id="codex")
+
+# See what each agent contributed
+mem.get_agent_stats("claude")
+# → {"facts": 42, "rules": 5, "last_active_at": "2026-03-03T..."}
+
+mem.get_agents()
+# → [{"id": "claude", "name": "Claude Sonnet", ...}, ...]
+```
+
+**Concurrency:** `WriteQueue` serializes writes from multiple threads/agents — KuzuDB's single-writer constraint is handled automatically.
+
+---
+
+### Decision Archive
+
+Record *why* decisions were made. Query the causal chain later.
+
+```python
+mem = LorienMemory()
+
+# Record a decision with its evidence
+did = mem.add_decision(
+    "Use REST API over GraphQL",
+    decision_type="judgment",
+    context="Simple CRUD app, team familiar with REST",
+    agent_id="claude",
+    supporting_fact_ids=[fact_rest_id],    # REST is well-documented
+    opposing_fact_ids=[fact_graphql_id],   # GraphQL reduces overfetching
+    rule_ids=[rule_simplicity_id],         # Keep it simple (priority: 80)
+)
+
+# 6 months later: "why did we choose REST?"
+result = mem.why(did)
+# or by text search:
+result = mem.why("REST API decision")
+
+# → {
+#     "decision": {"text": "Use REST API over GraphQL", "agent_id": "claude", ...},
+#     "supporting_facts": [{"text": "REST is well-documented", ...}],
+#     "opposing_facts":   [{"text": "GraphQL reduces overfetching", ...}],
+#     "applied_rules":    [{"text": "Keep it simple", "priority": 80}],
+#   }
+
+# Search all decisions
+mem.search_decisions("database")
+# → [{"text": "Use PostgreSQL for persistence", ...}, ...]
+
+# Revoke a decision
+mem.revoke_decision(did)
 ```
 
 ---
@@ -130,6 +203,37 @@ detector = ContradictionDetector(
     similarity_threshold=0.55,
 )
 n = detector.check_and_record(new_fact_id, new_fact_text)
+```
+
+---
+
+## CLI
+
+```bash
+# Initialize
+lorien init
+
+# Check status (shows Entity/Fact/Rule/Agent/Decision counts)
+lorien status
+
+# Ingest a file (MEMORY.md, notes, etc.)
+lorien ingest MEMORY.md
+lorien ingest MEMORY.md --model haiku   # LLM extraction via OpenClaw
+
+# Query the graph
+lorien query "MATCH (e:Entity) RETURN e.name LIMIT 10"
+
+# Show entity details
+lorien show "alice"
+
+# List contradictions
+lorien contradictions
+
+# Conversation memory for a user
+lorien memory alice
+
+# Web visualization (vis.js, no extra deps)
+lorien serve
 ```
 
 ---
@@ -175,12 +279,16 @@ DB stored at `~/.lorien/db`. Vectors at `~/.lorien/vectors.db`.
 - [x] v0.1 — Mem0-compatible `LorienMemory` API
 - [x] v0.2 — Vector semantic search (sentence-transformers, multilingual)
 - [x] v0.2 — Automatic contradiction detection
-- [ ] v0.2 — PyPI release (`pip install lorien-memory`)
-- [ ] v1.0 — Web graph visualization
-- [ ] v1.0 — LangChain adapter
+- [x] v0.2 — PyPI release (`pip install lorien-memory`)
+- [x] v0.2 — LangChain adapter (`LorienChatMemory`)
+- [x] v0.3 — Temporal tagging (freshness decay, SUPERSEDES, knowledge evolution)
+- [x] v0.3 — Multi-agent shared memory (Agent node, CREATED_BY, WriteQueue)
+- [x] v0.3 — Decision archive (`add_decision()`, `why()`, causal chain)
+- [ ] v0.4 — Parameterized queries (hardened security)
+- [ ] v0.4 — Agent conflict resolution
+- [ ] v1.0 — Web UI (graph explorer + decision timeline)
+- [ ] v1.0 — REST API server mode
 
 ---
 
----
-
-MIT License · [GitHub](https://github.com/paperbags1103-hash/lorien)
+MIT License · [GitHub](https://github.com/paperbags1103-hash/lorien) · [PyPI](https://pypi.org/project/lorien-memory/)
