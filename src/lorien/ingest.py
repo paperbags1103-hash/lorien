@@ -164,6 +164,17 @@ class LorienIngester:
             except ImportError:
                 pass  # sentence-transformers not installed, skip silently
 
+        # Contradiction detector (uses vectors when available)
+        self._contradiction_detector = None  # lazy-init on first use
+
+    @property
+    def contradiction_detector(self):
+        """Lazy-init ContradictionDetector."""
+        if self._contradiction_detector is None:
+            from .contradiction import ContradictionDetector
+            self._contradiction_detector = ContradictionDetector.from_ingester(self)
+        return self._contradiction_detector
+
     def ingest_text(self, text: str, source: str = "manual") -> IngestResult:
         text = text.strip()
         if not text:
@@ -466,6 +477,14 @@ class LorienIngester:
                 if self.vectors:
                     try:
                         self.vectors.add(stored.id, "Fact", stored.text)
+                    except Exception:
+                        pass
+                # Auto-detect contradictions
+                if self.vectors and self.llm_model:
+                    try:
+                        self.contradiction_detector.check_and_record(
+                            stored.id, stored.text, node_type="Fact"
+                        )
                     except Exception:
                         pass
             except Exception as exc:

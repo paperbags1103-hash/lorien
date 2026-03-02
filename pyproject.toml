@@ -5,7 +5,7 @@ backend-path = ["."]
 
 [project]
 name = "lorien"
-version = "0.1.0"
+version = "0.2.0"
 description = "Personal knowledge graph for AI agents - backed by Kuzu embedded graph DB"
 readme = "README.md"
 requires-python = ">=3.12"
