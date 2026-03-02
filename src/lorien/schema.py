@@ -106,7 +106,15 @@ class GraphStore:
                 self.conn.execute(f"CREATE REL TABLE {rel_name}({spec})")
 
     def _q(self, value: str | None) -> str:
-        """Escape a string value for safe embedding in a Cypher literal."""
+        """Escape a string value for safe embedding in a Cypher literal.
+
+        Handles backslash and single-quote escaping. Converts None to empty string.
+
+        Note: This is a best-effort escape for ASCII/common inputs. It is NOT
+        resistant to Unicode escape sequences (e.g. \\u0027). For production
+        environments with untrusted input, prefer KuzuDB parameterized queries
+        via ``conn.execute(query, parameters={"key": value})``.
+        """
         if value is None:
             return "''"
         value = value.replace("\\", "\\\\")

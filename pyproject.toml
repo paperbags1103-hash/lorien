@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "lorien-memory"
-version = "0.2.0"
+version = "0.3.0"
 description = "Local-first personal knowledge graph for AI agents — ontology, causal chains, contradiction detection"
 readme = "README.md"
 license = { text = "MIT" }
