@@ -348,6 +348,58 @@ class LorienMemory:
             return []
         return self.graph.get_active_rules(entity["id"])
 
+    # ── v0.3 Multi-agent API ───────────────────────────────────────────────────
+
+    def register_agent(self, agent_id: str, name: str | None = None, agent_type: str = "llm") -> dict:
+        """Register (or refresh) an agent in the knowledge graph.
+
+        Safe to call multiple times — returns existing agent if already present.
+        """
+        return self.store.get_or_create_agent(agent_id, name=name, agent_type=agent_type)
+
+    def get_agents(self) -> list[dict]:
+        """Return all registered agents, ordered by last activity."""
+        return self.store.list_agents()
+
+    def get_agent_stats(self, agent_id: str) -> dict:
+        """Return stats for a specific agent: fact/rule counts, last active, etc."""
+        return self.store.get_agent_stats(agent_id)
+
+    def add_with_agent(
+        self,
+        messages: list[dict],
+        user_id: str,
+        agent_id: str = "default",
+        agent_name: str | None = None,
+        agent_type: str = "llm",
+    ) -> dict:
+        """Add conversation with explicit agent attribution.
+
+        Like add(), but tags all extracted Facts with agent_id and creates
+        CREATED_BY edges to the Agent node.
+
+        Returns:
+            Same structure as add(), with agent_id included.
+        """
+        # Ensure agent exists
+        self.store.get_or_create_agent(agent_id, name=agent_name, agent_type=agent_type)
+
+        result = self.add(messages, user_id)
+
+        # Tag all newly-created facts with agent_id + create CREATED_BY edges
+        fact_ids = [f["id"] for f in result.get("facts", [])]
+        for fid in fact_ids:
+            try:
+                self.store.conn.execute(
+                    f"MATCH (f:Fact {{id:'{fid}'}}) SET f.agent_id = '{agent_id}'"
+                )
+                self.store.add_created_by(fid, agent_id)
+            except Exception:
+                pass
+
+        result["agent_id"] = agent_id
+        return result
+
     def get_contradictions(self) -> list[dict]:
         """Return detected contradictions — lorien-exclusive feature."""
         return self.graph.find_contradictions()

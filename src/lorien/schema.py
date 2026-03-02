@@ -6,7 +6,7 @@ from pathlib import Path
 
 import kuzu
 
-from .models import Entity, Fact, Rule
+from .models import Agent, Entity, Fact, Rule, DEFAULT_AGENT_ID
 
 
 class GraphStore:
@@ -41,6 +41,11 @@ class GraphStore:
         existing = self._existing_tables()
 
         node_ddl: dict[str, str] = {
+            "Agent": (
+                "id STRING, kind STRING, name STRING, agent_type STRING, "
+                "metadata STRING, created_at STRING, last_active_at STRING, "
+                "status STRING, PRIMARY KEY(id)"
+            ),
             "Entity": (
                 "id STRING, kind STRING, name STRING, entity_type STRING, "
                 "aliases STRING, description STRING, "
@@ -54,6 +59,7 @@ class GraphStore:
                 "valid_from STRING, valid_to STRING, negated BOOL, "
                 "created_at STRING, updated_at STRING, "
                 "last_confirmed STRING, expires_at STRING, version INT64, "
+                "agent_id STRING, "
                 "confidence DOUBLE, "
                 "source STRING, source_ref STRING, status STRING, "
                 "PRIMARY KEY(id)"
@@ -63,6 +69,7 @@ class GraphStore:
                 "priority INT64, "
                 "created_at STRING, updated_at STRING, "
                 "last_confirmed STRING, expires_at STRING, "
+                "agent_id STRING, "
                 "confidence DOUBLE, "
                 "source STRING, source_ref STRING, status STRING, "
                 "PRIMARY KEY(id)"
@@ -76,6 +83,7 @@ class GraphStore:
             ("CAUSED",      "FROM Fact TO Fact"),
             ("CONTRADICTS", "FROM Fact TO Fact"),
             ("SUPERSEDES",  "FROM Fact TO Fact, reason STRING, created_at STRING"),
+            ("CREATED_BY",  "FROM Fact TO Agent, created_at STRING"),
         ]
 
         for table_name, columns in node_ddl.items():
@@ -101,6 +109,86 @@ class GraphStore:
         while result.has_next():
             rows.append(result.get_next())
         return rows
+
+    def add_agent(self, agent: Agent) -> None:
+        """Insert an Agent node."""
+        self.conn.execute(
+            f"CREATE (n:Agent {{"
+            f"id:{self._q(agent.id)}, kind:{self._q(agent.kind)}, "
+            f"name:{self._q(agent.name)}, agent_type:{self._q(agent.agent_type)}, "
+            f"metadata:{self._q(agent.metadata)}, "
+            f"created_at:{self._q(agent.created_at)}, "
+            f"last_active_at:{self._q(agent.last_active_at)}, "
+            f"status:{self._q(agent.status)}"
+            f"}})"
+        )
+
+    def get_or_create_agent(self, agent_id: str, name: str | None = None, agent_type: str = "llm") -> dict:
+        """Return existing agent dict or create a new one. Thread-safe by design (upsert pattern)."""
+        rows = self._rows(
+            f"MATCH (a:Agent {{id:{self._q(agent_id)}}}) "
+            f"RETURN a.id, a.name, a.agent_type, a.last_active_at"
+        )
+        if rows:
+            # Update last_active_at
+            from datetime import datetime, timezone
+            now = datetime.now(timezone.utc).isoformat()
+            self.conn.execute(
+                f"MATCH (a:Agent {{id:{self._q(agent_id)}}}) "
+                f"SET a.last_active_at = {self._q(now)}"
+            )
+            return {"id": rows[0][0], "name": rows[0][1], "agent_type": rows[0][2]}
+
+        agent = Agent(
+            id=agent_id,
+            name=name or agent_id,
+            agent_type=agent_type,
+        )
+        self.add_agent(agent)
+        return {"id": agent.id, "name": agent.name, "agent_type": agent.agent_type}
+
+    def add_created_by(self, fact_id: str, agent_id: str) -> None:
+        """Create CREATED_BY edge: (Fact)-[:CREATED_BY]->(Agent)."""
+        from datetime import datetime, timezone
+        now = datetime.now(timezone.utc).isoformat()
+        self.conn.execute(
+            f"MATCH (f:Fact {{id:{self._q(fact_id)}}}), "
+            f"(a:Agent {{id:{self._q(agent_id)}}}) "
+            f"CREATE (f)-[:CREATED_BY {{created_at:{self._q(now)}}}]->(a)"
+        )
+
+    def get_agent_stats(self, agent_id: str) -> dict:
+        """Return stats for a specific agent."""
+        fact_rows = self._rows(
+            f"MATCH (f:Fact {{agent_id:{self._q(agent_id)}, status:'active'}}) RETURN count(f)"
+        )
+        rule_rows = self._rows(
+            f"MATCH (r:Rule {{agent_id:{self._q(agent_id)}, status:'active'}}) RETURN count(r)"
+        )
+        agent_rows = self._rows(
+            f"MATCH (a:Agent {{id:{self._q(agent_id)}}}) "
+            f"RETURN a.name, a.agent_type, a.last_active_at"
+        )
+        return {
+            "agent_id": agent_id,
+            "name": agent_rows[0][0] if agent_rows else agent_id,
+            "agent_type": agent_rows[0][1] if agent_rows else "unknown",
+            "last_active_at": agent_rows[0][2] if agent_rows else "",
+            "facts": int(fact_rows[0][0]) if fact_rows else 0,
+            "rules": int(rule_rows[0][0]) if rule_rows else 0,
+        }
+
+    def list_agents(self) -> list[dict]:
+        """Return all registered agents."""
+        rows = self._rows(
+            "MATCH (a:Agent) WHERE a.status = 'active' "
+            "RETURN a.id, a.name, a.agent_type, a.last_active_at "
+            "ORDER BY a.last_active_at DESC"
+        )
+        return [
+            {"id": r[0], "name": r[1], "agent_type": r[2], "last_active_at": r[3]}
+            for r in rows
+        ]
 
     def add_entity(self, entity: Entity) -> None:
         """Insert an Entity node."""
@@ -129,6 +217,7 @@ class GraphStore:
             f"created_at:{self._q(fact.created_at)}, updated_at:{self._q(fact.updated_at)}, "
             f"last_confirmed:{self._q(fact.last_confirmed)}, "
             f"expires_at:{self._q(fact.expires_at)}, version:{fact.version}, "
+            f"agent_id:{self._q(fact.agent_id)}, "
             f"confidence:{fact.confidence}, source:{self._q(fact.source)}, "
             f"source_ref:{self._q(fact.source_ref)}, status:{self._q(fact.status)}"
             f"}})"
@@ -144,6 +233,7 @@ class GraphStore:
             f"created_at:{self._q(rule.created_at)}, updated_at:{self._q(rule.updated_at)}, "
             f"last_confirmed:{self._q(rule.last_confirmed)}, "
             f"expires_at:{self._q(rule.expires_at)}, "
+            f"agent_id:{self._q(rule.agent_id)}, "
             f"confidence:{rule.confidence}, source:{self._q(rule.source)}, "
             f"source_ref:{self._q(rule.source_ref)}, status:{self._q(rule.status)}"
             f"}})"
