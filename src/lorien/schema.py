@@ -525,7 +525,7 @@ class GraphStore:
 
     def count_nodes(self) -> dict[str, int]:
         counts: dict[str, int] = {}
-        for table_name in ("Entity", "Fact", "Rule"):
+        for table_name in ("Entity", "Fact", "Rule", "Agent", "Decision"):
             rows = self._rows(f"MATCH (n:{table_name}) RETURN count(n)")
             counts[table_name] = int(rows[0][0]) if rows else 0
         return counts

@@ -84,7 +84,7 @@ def classify_temporal_relation(
         return "unrelated"
 
     if not same_subject_predicate:
-        return "contradiction"
+        return "unrelated"
 
     try:
         ts_a = datetime.fromisoformat(created_at_a) if created_at_a else None

@@ -3,7 +3,7 @@ from lorien.schema import GraphStore
 
 
 def test_init_creates_tables(tmp_store):
-    assert tmp_store.count_nodes() == {"Entity": 0, "Fact": 0, "Rule": 0}
+    assert tmp_store.count_nodes() == {"Entity": 0, "Fact": 0, "Rule": 0, "Agent": 0, "Decision": 0}
 
 
 def test_init_is_idempotent(tmp_path):
@@ -75,7 +75,7 @@ def test_count_nodes(tmp_store):
     tmp_store.add_fact(Fact("Alice uses Python"))
     tmp_store.add_rule(Rule("Always write tests"))
 
-    assert tmp_store.count_nodes() == {"Entity": 2, "Fact": 1, "Rule": 1}
+    assert tmp_store.count_nodes() == {"Entity": 2, "Fact": 1, "Rule": 1, "Agent": 0, "Decision": 0}
 
 
 def test_related_to_with_relation(tmp_store):
