@@ -59,6 +59,7 @@ class LorienMemory:
         model: str | None = None,
         api_key: str | None = None,
         base_url: str | None = None,
+        enable_vectors: bool = True,
     ) -> None:
         self.store = GraphStore(db_path=db_path)
         self.ingester = LorienIngester(
@@ -66,10 +67,10 @@ class LorienMemory:
             llm_model=model,
             api_key=api_key,
             base_url=base_url,
+            enable_vectors=enable_vectors,
         )
         self.graph = KnowledgeGraph(self.store)
-        # Override prompts to use conversation-focused prompts
-        self.ingester.__class__  # keep reference
+        self.vectors = self.ingester.vectors  # None if sentence-transformers not installed or disabled
 
     def add(
         self,
@@ -190,16 +191,58 @@ class LorienMemory:
         user_id: str | None = None,
         limit: int = 10,
     ) -> list[dict[str, Any]]:
-        """Keyword-based search across facts and rules.
+        """Search memories — vector (semantic) when available, keyword fallback.
 
         Args:
             query: Search string
-            user_id: If given, filter to this entity's facts
+            user_id: If given, filter to this entity's facts/rules
             limit: Max results
 
         Returns:
-            List of {"id": ..., "memory": ..., "score": ..., "type": "fact"|"rule"}
+            List of {"id", "memory", "score", "type": "fact"|"rule", ...}
         """
+        # Build entity fact/rule id sets for filtering (when user_id given)
+        allowed_ids: set[str] | None = None
+        if user_id:
+            entity = self.graph.get_entity(user_id)
+            if entity:
+                ctx = self.graph.get_entity_context(entity["id"])
+                allowed_ids = {f["id"] for f in ctx["facts"]} | {r["id"] for r in ctx["rules"]}
+            else:
+                return []
+
+        # ── Vector search path ────────────────────────────────────────────
+        if self.vectors:
+            raw = self.vectors.search(query, top_k=limit * 3)
+            results = []
+            for r in raw:
+                nid = r["id"]
+                if allowed_ids is not None and nid not in allowed_ids:
+                    continue
+                # Enrich with Kuzu data
+                ntype = r["node_type"]
+                if ntype == "Rule":
+                    rows = self.store.query(
+                        f"MATCH (n:Rule {{id:'{nid}'}}) RETURN n.priority"
+                    )
+                    priority = rows[0][0] if rows else 50
+                    results.append({
+                        "id": nid, "memory": r["text"],
+                        "score": r["score"], "type": "rule",
+                        "priority": priority,
+                        **({"user_id": user_id} if user_id else {}),
+                    })
+                else:
+                    results.append({
+                        "id": nid, "memory": r["text"],
+                        "score": r["score"], "type": "fact",
+                        **({"user_id": user_id} if user_id else {}),
+                    })
+                if len(results) >= limit:
+                    break
+            return results
+
+        # ── Keyword fallback ─────────────────────────────────────────────
         results = []
         q = query.lower()
 
@@ -210,47 +253,32 @@ class LorienMemory:
                 for f in ctx["facts"]:
                     if q in f["text"].lower():
                         results.append({
-                            "id": f["id"],
-                            "memory": f["text"],
-                            "score": f["confidence"],
-                            "type": "fact",
+                            "id": f["id"], "memory": f["text"],
+                            "score": f["confidence"], "type": "fact",
                             "user_id": user_id,
                         })
                 for r in ctx["rules"]:
                     if q in r["text"].lower():
                         results.append({
-                            "id": r["id"],
-                            "memory": r["text"],
-                            "score": r["confidence"],
-                            "type": "rule",
-                            "priority": r["priority"],
-                            "user_id": user_id,
+                            "id": r["id"], "memory": r["text"],
+                            "score": r["confidence"], "type": "rule",
+                            "priority": r["priority"], "user_id": user_id,
                         })
         else:
-            # Global search (limited)
-            fact_rows = self.store.query(
+            for fid, text, conf in self.store.query(
                 f"MATCH (f:Fact) WHERE f.status = 'active' "
                 f"RETURN f.id, f.text, f.confidence LIMIT {int(limit) * 5}"
-            )
-            for fid, text, conf in fact_rows:
+            ):
                 if q in text.lower():
-                    results.append({
-                        "id": fid, "memory": text,
-                        "score": conf, "type": "fact",
-                    })
-            rule_rows = self.store.query(
+                    results.append({"id": fid, "memory": text, "score": conf, "type": "fact"})
+            for rid, text, priority in self.store.query(
                 f"MATCH (r:Rule) WHERE r.status = 'active' "
                 f"RETURN r.id, r.text, r.priority LIMIT {int(limit) * 2}"
-            )
-            for rid, text, priority in rule_rows:
+            ):
                 if q in text.lower():
-                    results.append({
-                        "id": rid, "memory": text,
-                        "score": 1.0, "type": "rule",
-                        "priority": priority,
-                    })
+                    results.append({"id": rid, "memory": text, "score": 1.0,
+                                    "type": "rule", "priority": priority})
 
-        # Sort by score DESC, limit
         results.sort(key=lambda x: x["score"], reverse=True)
         return results[:limit]
 

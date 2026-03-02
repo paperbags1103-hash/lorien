@@ -138,6 +138,7 @@ class LorienIngester:
         api_key: str | None = None,
         base_url: str | None = None,
         use_openclaw: bool = False,
+        enable_vectors: bool = False,
     ) -> None:
         self.store = store
         self.llm_model = llm_model
@@ -153,6 +154,15 @@ class LorienIngester:
         self.base_url = base_url or "https://api.openai.com/v1"
         self._use_openclaw = use_openclaw
         self._entity_cache: dict[str, str] = {}
+
+        # Optional vector index (lazy — only activates when sentence-transformers installed)
+        self.vectors = None
+        if enable_vectors:
+            try:
+                from .vectors import VectorIndex
+                self.vectors = VectorIndex(str(store.db_path))
+            except ImportError:
+                pass  # sentence-transformers not installed, skip silently
 
     def ingest_text(self, text: str, source: str = "manual") -> IngestResult:
         text = text.strip()
@@ -452,6 +462,12 @@ class LorienIngester:
                 if stored.subject_id:
                     self.store.add_about(stored.id, stored.subject_id)
                     result.edges_added += 1
+                # Index embedding
+                if self.vectors:
+                    try:
+                        self.vectors.add(stored.id, "Fact", stored.text)
+                    except Exception:
+                        pass
             except Exception as exc:
                 result.errors.append(f"fact error: {exc}")
 
@@ -472,6 +488,12 @@ class LorienIngester:
                 if entity_id:
                     self.store.add_has_rule(entity_id, stored.id)
                     result.edges_added += 1
+                # Index embedding
+                if self.vectors:
+                    try:
+                        self.vectors.add(stored.id, "Rule", stored.text)
+                    except Exception:
+                        pass
             except Exception as exc:
                 result.errors.append(f"rule error: {exc}")
 
