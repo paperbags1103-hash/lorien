@@ -1,0 +1,26 @@
+[build-system]
+requires = []
+build-backend = "build_backend"
+backend-path = ["."]
+
+[project]
+name = "lorien"
+version = "0.1.0"
+description = "Personal knowledge graph for AI agents - backed by Kuzu embedded graph DB"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "kuzu>=0.8.0",
+    "click>=8.0",
+    "gitpython>=3.1",
+]
+
+[project.optional-dependencies]
+llm = ["openai>=1.0"]
+dev = ["pytest>=8.0"]
+
+[project.scripts]
+lorien = "lorien.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/lorien"]
