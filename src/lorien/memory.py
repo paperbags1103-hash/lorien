@@ -613,6 +613,113 @@ class LorienMemory:
         except Exception:
             return False
 
+    # ── v0.4 Epistemic Debt API ────────────────────────────────────────────────
+
+    def get_epistemic_debt(
+        self,
+        min_confidence: float = 0.7,
+        min_age_days: float = 60.0,
+        limit: int = 20,
+    ) -> list[dict]:
+        """Surface facts assumed for a long time without re-verification.
+
+        Returns facts ordered by debt_score (confidence × age / 365).
+        """
+        return self.store.get_epistemic_debt(
+            min_confidence=min_confidence,
+            min_age_days=min_age_days,
+            limit=limit,
+        )
+
+    def review_debt(
+        self,
+        fact_id: str,
+        action: str,
+        new_text: str | None = None,
+    ) -> dict:
+        """Take action on an epistemic debt fact.
+
+        Args:
+            fact_id: The fact to review.
+            action: "confirm" | "update" | "expire"
+            new_text: Required when action="update".
+
+        Returns:
+            {"action": str, "fact_id": str, "new_fact_id": str | None}
+        """
+        if action == "confirm":
+            self.store.confirm_fact(fact_id)
+            return {"action": "confirm", "fact_id": fact_id, "new_fact_id": None}
+
+        elif action == "expire":
+            self.store.conn.execute(
+                f"MATCH (f:Fact {{id:{self.store._q(fact_id)}}}) SET f.status = 'expired'"
+            )
+            return {"action": "expire", "fact_id": fact_id, "new_fact_id": None}
+
+        elif action == "update":
+            if not new_text:
+                raise ValueError("new_text required for action='update'")
+            # Get old fact fields to copy
+            rows = self.store.query(
+                f"MATCH (f:Fact {{id:{self.store._q(fact_id)}}}) "
+                f"RETURN f.subject_id, f.predicate, f.fact_type, f.agent_id, f.confidence"
+            )
+            if not rows:
+                raise ValueError(f"Fact {fact_id} not found")
+            subj, pred, ftype, agent_id, conf = rows[0]
+
+            from .models import Fact
+            new_fact = Fact(
+                text=new_text,
+                subject_id=subj or "",
+                predicate=pred or "",
+                fact_type=ftype or "statement",
+                agent_id=agent_id or "default",
+                confidence=float(conf or 1.0),
+                version=2,
+            )
+            self.store.add_fact(new_fact)
+            self.store.add_supersedes(new_fact.id, fact_id, reason="manual_update")
+            return {"action": "update", "fact_id": fact_id, "new_fact_id": new_fact.id}
+
+        else:
+            raise ValueError(f"Unknown action: {action}. Use 'confirm', 'update', or 'expire'.")
+
+    # ── v0.4 Belief Fork API ───────────────────────────────────────────────────
+
+    def get_belief_forks(
+        self,
+        only_critical: bool = False,
+        min_agents: int = 2,
+    ) -> list[dict]:
+        """Return diverging beliefs across agents.
+
+        Returns forks ordered by severity (critical first).
+        """
+        return self.store.find_belief_forks(
+            min_agents=min_agents,
+            only_critical=only_critical,
+        )
+
+    # ── v0.4 Consequence Simulation API ───────────────────────────────────────
+
+    def simulate_decision(
+        self,
+        text: str,
+        decision_type: str = "action",
+        supporting_fact_ids: list[str] | None = None,
+        agent_id: str = "default",
+    ) -> dict:
+        """Dry-run a decision to see its impact before committing (read-only).
+
+        Does NOT write to the graph.
+        """
+        return self.store.simulate_decision_impact(
+            decision_text=text,
+            supporting_fact_ids=supporting_fact_ids,
+        )
+
     def freshness(self, fact_id: str) -> float:
         """Get the freshness score (0.0–1.0) for a specific fact."""
         from .temporal import freshness_score as _freshness
