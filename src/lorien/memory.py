@@ -333,11 +333,10 @@ class LorienMemory:
 
     def delete(self, memory_id: str) -> bool:
         """Soft-delete a memory (Fact or Rule) by id."""
-        # Try fact first, then rule
-        for table in ("Fact", "Rule"):
-            safe_id = memory_id.replace("'", "\\'")
+        safe_id = self.store._q(memory_id)
+        for table in ("Fact", "Rule"):  # whitelist — no user input reaches table name
             self.store.conn.execute(
-                f"MATCH (n:{table} {{id: '{safe_id}'}}) SET n.status = 'deleted'"
+                f"MATCH (n:{table} {{id: {safe_id}}}) SET n.status = 'deleted'"
             )
         return True
 
@@ -391,7 +390,8 @@ class LorienMemory:
         for fid in fact_ids:
             try:
                 self.store.conn.execute(
-                    f"MATCH (f:Fact {{id:'{fid}'}}) SET f.agent_id = '{agent_id}'"
+                    f"MATCH (f:Fact {{id:{self.store._q(fid)}}}) "
+                    f"SET f.agent_id = {self.store._q(agent_id)}"
                 )
                 self.store.add_created_by(fid, agent_id)
             except Exception:
@@ -602,9 +602,12 @@ class LorienMemory:
 
     def revoke_decision(self, decision_id: str) -> bool:
         """Mark a decision as revoked (no longer active)."""
+        from datetime import datetime, timezone
+        now = datetime.now(timezone.utc).isoformat()
         try:
             self.store.conn.execute(
-                f"MATCH (d:Decision {{id:'{decision_id}'}}) SET d.status = 'revoked'"
+                f"MATCH (d:Decision {{id:{self.store._q(decision_id)}}}) "
+                f"SET d.status = 'revoked', d.updated_at = {self.store._q(now)}"
             )
             return True
         except Exception:

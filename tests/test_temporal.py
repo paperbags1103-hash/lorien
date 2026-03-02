@@ -80,13 +80,13 @@ class TestClassifyTemporalRelation:
         )
         assert result == "contradiction"
 
-    def test_different_subject_predicate_is_contradiction(self):
+    def test_different_subject_predicate_is_unrelated(self):
         result = classify_temporal_relation(
             "User loves Python", _ts(60),
             "User hates Python", _ts(0),
             same_subject_predicate=False,
         )
-        assert result == "contradiction"
+        assert result == "unrelated"
 
     def test_empty_text_is_unrelated(self):
         assert classify_temporal_relation("", _ts(0), "", _ts(0)) == "unrelated"

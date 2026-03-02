@@ -28,9 +28,10 @@ class WriteQueue:
 
     def __init__(self, maxsize: int = 500) -> None:
         self._q: queue.Queue[tuple[Callable, Future] | None] = queue.Queue(maxsize=maxsize)
+        self._lock = threading.Lock()
+        self._closed = False
         self._worker = threading.Thread(target=self._run, daemon=True, name="lorien-write-worker")
         self._worker.start()
-        self._closed = False
 
     def _run(self) -> None:
         while True:
@@ -54,11 +55,12 @@ class WriteQueue:
             RuntimeError: if the queue has been shut down.
             queue.Full: if the queue is at capacity.
         """
-        if self._closed:
-            raise RuntimeError("WriteQueue is shut down")
-        future: Future = Future()
-        self._q.put((fn, future))
-        return future
+        with self._lock:
+            if self._closed:
+                raise RuntimeError("WriteQueue is shut down")
+            future: Future = Future()
+            self._q.put((fn, future))
+            return future
 
     def submit_sync(self, fn: Callable[[], Any], timeout: float = 30.0) -> Any:
         """Submit and block until the operation completes."""
@@ -69,8 +71,9 @@ class WriteQueue:
 
     def shutdown(self, wait: bool = True) -> None:
         """Stop accepting new work and optionally drain the queue."""
-        self._closed = True
-        self._q.put(None)
+        with self._lock:
+            self._closed = True
+            self._q.put(None)
         if wait:
             self._worker.join(timeout=10.0)
 
