@@ -143,18 +143,37 @@ class KnowledgeGraph:
                     lines.append(f"- {f['text']}")
                 lines.append("")
         else:
-            rules = self.get_active_rules()
-            if rules:
-                lines.append("## Rules\n")
-                for r in rules:
-                    lines.append(f"- [{r['rule_type']}] {r['text']}")
+            # Full export: group by entity
+            entities = self.store.query(
+                "MATCH (e:Entity) WHERE e.status = 'active' "
+                "RETURN e.id, e.name, e.entity_type ORDER BY e.name"
+            )
+
+            for eid, ename, etype in entities:
+                ctx = self.get_entity_context(eid)
+                if not ctx["facts"] and not ctx["rules"]:
+                    continue
+                lines.append(f"## {ename} ({etype})\n")
+                if ctx["rules"]:
+                    for r in ctx["rules"]:
+                        lines.append(f"- **[{r['rule_type']} p{r['priority']}]** {r['text']}")
+                if ctx["facts"]:
+                    for f in ctx["facts"]:
+                        lines.append(f"- {f['text']}")
                 lines.append("")
-            facts = self.get_recent_facts(50)
-            if facts:
-                lines.append("## Recent Facts\n")
-                for f in facts:
-                    lines.append(f"- {f['text']}")
+
+            # Global rules not tied to an entity
+            global_rules = self.store.query(
+                "MATCH (r:Rule) WHERE r.status = 'active' "
+                "AND NOT EXISTS { MATCH (e:Entity)-[:HAS_RULE]->(r) } "
+                "RETURN r.text, r.rule_type, r.priority ORDER BY r.priority DESC"
+            )
+            if global_rules:
+                lines.append("## Global Rules\n")
+                for text, rtype, priority in global_rules:
+                    lines.append(f"- **[{rtype} p{priority}]** {text}")
                 lines.append("")
+
             contradictions = self.find_contradictions()
             if contradictions:
                 lines.append("## ⚠️ Contradictions\n")
