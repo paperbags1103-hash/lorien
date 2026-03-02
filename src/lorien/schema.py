@@ -6,7 +6,7 @@ from pathlib import Path
 
 import kuzu
 
-from .models import Agent, Entity, Fact, Rule, DEFAULT_AGENT_ID
+from .models import Agent, Decision, Entity, Fact, Rule, DEFAULT_AGENT_ID
 
 
 class GraphStore:
@@ -41,6 +41,12 @@ class GraphStore:
         existing = self._existing_tables()
 
         node_ddl: dict[str, str] = {
+            "Decision": (
+                "id STRING, kind STRING, text STRING, decision_type STRING, "
+                "context STRING, agent_id STRING, confidence DOUBLE, "
+                "status STRING, created_at STRING, updated_at STRING, "
+                "PRIMARY KEY(id)"
+            ),
             "Agent": (
                 "id STRING, kind STRING, name STRING, agent_type STRING, "
                 "metadata STRING, created_at STRING, last_active_at STRING, "
@@ -84,6 +90,11 @@ class GraphStore:
             ("CONTRADICTS", "FROM Fact TO Fact"),
             ("SUPERSEDES",  "FROM Fact TO Fact, reason STRING, created_at STRING"),
             ("CREATED_BY",  "FROM Fact TO Agent, created_at STRING"),
+            # Decision edges
+            ("BASED_ON",    "FROM Decision TO Fact, role STRING"),
+            ("APPLIED_RULE","FROM Decision TO Rule, role STRING"),
+            ("DECIDED_BY",  "FROM Decision TO Agent, created_at STRING"),
+            ("SUPERSEDES_D","FROM Decision TO Decision, reason STRING, created_at STRING"),
         ]
 
         for table_name, columns in node_ddl.items():
@@ -332,6 +343,119 @@ class GraphStore:
                 f"MATCH (f:Fact {{id:{self._q(row[0])}}}) SET f.status = 'expired'"
             )
         return len(rows)
+
+    # ── Decision methods ──────────────────────────────────────────────────────
+
+    def add_decision(self, decision: Decision) -> None:
+        """Insert a Decision node."""
+        self.conn.execute(
+            f"CREATE (n:Decision {{"
+            f"id:{self._q(decision.id)}, kind:{self._q(decision.kind)}, "
+            f"text:{self._q(decision.text)}, decision_type:{self._q(decision.decision_type)}, "
+            f"context:{self._q(decision.context)}, agent_id:{self._q(decision.agent_id)}, "
+            f"confidence:{decision.confidence}, status:{self._q(decision.status)}, "
+            f"created_at:{self._q(decision.created_at)}, updated_at:{self._q(decision.updated_at)}"
+            f"}})"
+        )
+
+    def add_based_on(self, decision_id: str, fact_id: str, role: str = "supporting") -> None:
+        """Create BASED_ON edge: (Decision)-[:BASED_ON {role}]->(Fact)."""
+        self.conn.execute(
+            f"MATCH (d:Decision {{id:{self._q(decision_id)}}}), "
+            f"(f:Fact {{id:{self._q(fact_id)}}}) "
+            f"CREATE (d)-[:BASED_ON {{role:{self._q(role)}}}]->(f)"
+        )
+
+    def add_applied_rule(self, decision_id: str, rule_id: str, role: str = "primary") -> None:
+        """Create APPLIED_RULE edge: (Decision)-[:APPLIED_RULE {role}]->(Rule)."""
+        self.conn.execute(
+            f"MATCH (d:Decision {{id:{self._q(decision_id)}}}), "
+            f"(r:Rule {{id:{self._q(rule_id)}}}) "
+            f"CREATE (d)-[:APPLIED_RULE {{role:{self._q(role)}}}]->(r)"
+        )
+
+    def add_decided_by(self, decision_id: str, agent_id: str) -> None:
+        """Create DECIDED_BY edge: (Decision)-[:DECIDED_BY]->(Agent)."""
+        from datetime import datetime, timezone
+        now = datetime.now(timezone.utc).isoformat()
+        self.conn.execute(
+            f"MATCH (d:Decision {{id:{self._q(decision_id)}}}), "
+            f"(a:Agent {{id:{self._q(agent_id)}}}) "
+            f"CREATE (d)-[:DECIDED_BY {{created_at:{self._q(now)}}}]->(a)"
+        )
+
+    def supersede_decision(self, new_id: str, old_id: str, reason: str = "updated") -> None:
+        """Mark old decision as superseded; create SUPERSEDES_D edge."""
+        from datetime import datetime, timezone
+        now = datetime.now(timezone.utc).isoformat()
+        self.conn.execute(
+            f"MATCH (a:Decision {{id:{self._q(new_id)}}}), "
+            f"(b:Decision {{id:{self._q(old_id)}}}) "
+            f"CREATE (a)-[:SUPERSEDES_D {{reason:{self._q(reason)}, created_at:{self._q(now)}}}]->(b)"
+        )
+        self.conn.execute(
+            f"MATCH (d:Decision {{id:{self._q(old_id)}}}) SET d.status = 'superseded'"
+        )
+
+    def get_decision_chain(self, decision_id: str) -> dict:
+        """Return a decision with all its supporting facts and applied rules."""
+        # Decision node
+        d_rows = self._rows(
+            f"MATCH (d:Decision {{id:{self._q(decision_id)}}}) "
+            f"RETURN d.id, d.text, d.decision_type, d.context, "
+            f"d.agent_id, d.confidence, d.status, d.created_at"
+        )
+        if not d_rows:
+            return {}
+
+        r = d_rows[0]
+        chain: dict = {
+            "id": r[0], "text": r[1], "decision_type": r[2],
+            "context": r[3], "agent_id": r[4],
+            "confidence": r[5], "status": r[6], "created_at": r[7],
+            "supporting_facts": [], "opposing_facts": [], "applied_rules": [],
+        }
+
+        # Supporting / opposing facts
+        f_rows = self._rows(
+            f"MATCH (d:Decision {{id:{self._q(decision_id)}}})"
+            f"-[r:BASED_ON]->(f:Fact) "
+            f"RETURN f.id, f.text, f.confidence, r.role"
+        )
+        for fid, text, conf, role in f_rows:
+            entry = {"id": fid, "text": text, "confidence": conf}
+            if role == "opposing":
+                chain["opposing_facts"].append(entry)
+            else:
+                chain["supporting_facts"].append(entry)
+
+        # Applied rules
+        rule_rows = self._rows(
+            f"MATCH (d:Decision {{id:{self._q(decision_id)}}})"
+            f"-[r:APPLIED_RULE]->(rl:Rule) "
+            f"RETURN rl.id, rl.text, rl.priority, r.role"
+        )
+        for rid, text, priority, role in rule_rows:
+            chain["applied_rules"].append({
+                "id": rid, "text": text, "priority": priority, "role": role
+            })
+
+        return chain
+
+    def search_decisions(self, query: str, limit: int = 10) -> list[dict]:
+        """Full-text search over Decision text/context."""
+        safe_q = self._q(query.lower())
+        rows = self._rows(
+            f"MATCH (d:Decision) WHERE d.status = 'active' "
+            f"AND (lower(d.text) CONTAINS {safe_q} "
+            f"OR lower(d.context) CONTAINS {safe_q}) "
+            f"RETURN d.id, d.text, d.decision_type, d.created_at "
+            f"ORDER BY d.created_at DESC LIMIT {int(limit)}"
+        )
+        return [
+            {"id": r[0], "text": r[1], "decision_type": r[2], "created_at": r[3]}
+            for r in rows
+        ]
 
     def migrate_v02_to_v03(self) -> dict:
         """Add v0.3 temporal fields to existing v0.2 nodes (in-place migration).

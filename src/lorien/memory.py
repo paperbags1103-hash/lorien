@@ -486,6 +486,130 @@ class LorienMemory:
         )
         return {"expired": expired}
 
+    # ── v0.3 Decision Archive API ──────────────────────────────────────────────
+
+    def add_decision(
+        self,
+        text: str,
+        decision_type: str = "action",
+        context: str = "",
+        agent_id: str = "default",
+        supporting_fact_ids: list[str] | None = None,
+        opposing_fact_ids: list[str] | None = None,
+        rule_ids: list[str] | None = None,
+        confidence: float = 1.0,
+    ) -> str:
+        """Record a decision with its supporting evidence.
+
+        Args:
+            text: What was decided.
+            decision_type: "action" | "judgment" | "preference" | "plan"
+            context: Situation summary at decision time.
+            agent_id: Which agent made this decision.
+            supporting_fact_ids: Fact IDs that support this decision.
+            opposing_fact_ids: Fact IDs considered but overridden.
+            rule_ids: Rule IDs that were applied.
+            confidence: Decision confidence 0.0-1.0.
+
+        Returns:
+            decision_id
+        """
+        from .models import Decision
+
+        # Ensure agent exists
+        self.store.get_or_create_agent(agent_id)
+
+        decision = Decision(
+            text=text,
+            decision_type=decision_type,
+            context=context,
+            agent_id=agent_id,
+            confidence=confidence,
+        )
+        self.store.add_decision(decision)
+
+        # DECIDED_BY edge
+        try:
+            self.store.add_decided_by(decision.id, agent_id)
+        except Exception:
+            pass
+
+        # BASED_ON edges
+        for fid in (supporting_fact_ids or []):
+            try:
+                self.store.add_based_on(decision.id, fid, role="supporting")
+            except Exception:
+                pass
+        for fid in (opposing_fact_ids or []):
+            try:
+                self.store.add_based_on(decision.id, fid, role="opposing")
+            except Exception:
+                pass
+
+        # APPLIED_RULE edges
+        for rid in (rule_ids or []):
+            try:
+                self.store.add_applied_rule(decision.id, rid)
+            except Exception:
+                pass
+
+        return decision.id
+
+    def why(self, decision_id_or_query: str) -> dict:
+        """Answer 'why was this decision made?' — returns causal chain.
+
+        Accepts either a decision_id directly or a text query to find
+        the most relevant decision.
+
+        Returns:
+            {
+                "decision": {...},
+                "supporting_facts": [...],
+                "opposing_facts": [...],
+                "applied_rules": [...],
+            }
+        """
+        # Try direct ID lookup first
+        chain = self.store.get_decision_chain(decision_id_or_query)
+        if not chain:
+            # Fall back to text search
+            results = self.store.search_decisions(decision_id_or_query, limit=1)
+            if results:
+                chain = self.store.get_decision_chain(results[0]["id"])
+
+        if not chain:
+            return {"error": f"No decision found for: {decision_id_or_query}"}
+
+        return {
+            "decision": {
+                "id": chain["id"],
+                "text": chain["text"],
+                "decision_type": chain["decision_type"],
+                "context": chain["context"],
+                "agent_id": chain["agent_id"],
+                "confidence": chain["confidence"],
+                "status": chain["status"],
+                "created_at": chain["created_at"],
+            },
+            "supporting_facts": chain["supporting_facts"],
+            "opposing_facts": chain["opposing_facts"],
+            "applied_rules": chain["applied_rules"],
+        }
+
+    def search_decisions(self, query: str, limit: int = 10) -> list[dict]:
+        """Search decisions by text or context."""
+        return self.store.search_decisions(query, limit=limit)
+
+    def revoke_decision(self, decision_id: str) -> bool:
+        """Mark a decision as revoked (no longer active)."""
+        try:
+            self.store.conn.execute(
+                f"MATCH (d:Decision {{id:'{decision_id}'}}) SET d.status = 'revoked'"
+            )
+            return True
+        except Exception:
+            return False
+
     def freshness(self, fact_id: str) -> float:
         """Get the freshness score (0.0–1.0) for a specific fact."""
         from .temporal import freshness_score as _freshness

@@ -40,6 +40,20 @@ class Entity:
 
 
 @dataclass
+class Decision:
+    text: str
+    id: str = field(default_factory=_uid)
+    kind: str = "decision"
+    decision_type: str = "action"   # "action" | "judgment" | "preference" | "plan"
+    context: str = ""               # situation summary at decision time
+    agent_id: str = DEFAULT_AGENT_ID
+    confidence: float = 1.0
+    status: str = "active"          # "active" | "revoked" | "superseded"
+    created_at: str = field(default_factory=_now)
+    updated_at: str = field(default_factory=_now)
+
+
+@dataclass
 class Agent:
     name: str
     id: str = field(default_factory=_uid)
