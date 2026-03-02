@@ -3,7 +3,7 @@ from .contradiction import ContradictionDetector
 from .ingest import LorienIngester
 from .integrations.langchain import LorienChatMemory
 from .memory import LorienMemory
-from .models import Agent, Entity, Fact, Rule
+from .models import Agent, Decision, Entity, Fact, Rule
 from .query import KnowledgeGraph
 from .schema import GraphStore
 from .temporal import freshness_score, is_stale, classify_temporal_relation
@@ -11,6 +11,7 @@ from .temporal import freshness_score, is_stale, classify_temporal_relation
 __all__ = [
     "Agent",
     "ContradictionDetector",
+    "Decision",
     "Entity",
     "Fact",
     "Rule",
