@@ -36,7 +36,43 @@ def status(db: str) -> None:
 
 
 @main.command()
-@click.argument("file", type=click.Path(exists=True))
+@click.argument("text")
+@click.option("--db", default=DEFAULT_DB, show_default=True)
+@click.option("--confidence", default=0.8, show_default=True, help="Confidence 0.0–1.0")
+@click.option("--subject", default=None, help="Entity name this fact belongs to")
+def add(text: str, db: str, confidence: float, subject: str | None) -> None:
+    """Add a single fact directly to the graph.
+
+    Example:
+      lorien add "Alice는 굴 알레르기가 있다" --confidence 0.9
+      lorien add "사용자는 커피를 좋아한다" --subject 사용자
+    """
+    from .schema import GraphStore
+
+    store = GraphStore(db_path=db)
+    entity_name = subject or _extract_subject(text)
+    entity = store.get_or_create_entity(entity_name, "person")
+    fact_id = store.add_fact(text, entity["id"], confidence=confidence)
+    click.echo(f"✓ Added fact [{confidence:.2f}]: {text}")
+    # Check for contradictions
+    contras = store.get_contradictions()
+    relevant = [c for c in contras if fact_id in (c.get("fact_a"), c.get("fact_b"))]
+    if relevant:
+        click.echo(f"⚡ {len(relevant)} contradiction(s) detected!")
+        for c in relevant:
+            click.echo(f"  ↔ {c.get('fact_a_text', '')} vs {c.get('fact_b_text', '')}")
+
+
+def _extract_subject(text: str) -> str:
+    """Naive subject extraction — first word or 'user'."""
+    words = text.split()
+    if words:
+        return words[0].rstrip("는은이가")
+    return "user"
+
+
+@main.command()
+@click.argument("file", type=click.Path(exists=True, allow_dash=True))
 @click.option("--db", default=DEFAULT_DB, show_default=True)
 @click.option("--model", default=None, help="LLM model e.g. claude-haiku-3-5 (enables LLM extraction)")
 @click.option("--api-key", default=None, envvar=["ANTHROPIC_API_KEY", "LORIEN_API_KEY"],
@@ -74,8 +110,11 @@ def ingest(
     if verbose and model:
         click.echo(f"→ LLM mode: {model}")
 
-    # Auto-route: .md files → section-aware ingest_memory_md(), others → ingest_text()
-    if Path(file).suffix.lower() == ".md":
+    # Auto-route: stdin(-), .md files, others
+    if file == "-":
+        text = sys.stdin.read()
+        result = ingester.ingest_text(text, source="stdin")
+    elif Path(file).suffix.lower() == ".md":
         result = ingester.ingest_memory_md(file, verbose=verbose, batch_size=batch)
     else:
         text = Path(file).read_text(encoding="utf-8")
