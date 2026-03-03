@@ -107,26 +107,31 @@ HEADER_RE = re.compile(r"^#{1,6}\s+")
 
 def _read_openclaw_gateway() -> tuple[str, str] | None:
     """Read OpenClaw gateway URL + token from ~/.openclaw/openclaw.json.
-    Returns (base_url, token) or None if not available."""
+    Returns (base_url, token) or None if not available.
+
+    Handles non-standard JSON with trailing commas (common in OpenClaw config).
+    """
+    import re as _re
     config_path = Path.home() / ".openclaw" / "openclaw.json"
     if not config_path.exists():
         return None
     try:
         import json as _json
-        config = _json.loads(config_path.read_text(encoding="utf-8"))
+        import os as _os
+        raw = config_path.read_text(encoding="utf-8")
+        # Strip trailing commas — OpenClaw uses non-standard JSON
+        raw = _re.sub(r",(\s*[}\]])", r"\1", raw)
+        config = _json.loads(raw)
         gw = config.get("gateway", {})
         token = gw.get("auth", {}).get("token", "")
         port = gw.get("port", 18789)
-        enabled = (
-            gw.get("http", {})
-            .get("endpoints", {})
-            .get("chatCompletions", {})
-            .get("enabled", False)
-        )
-        if token and enabled:
+        # Don't gate on chatCompletions.enabled — field may be absent
+        if token:
             return f"http://127.0.0.1:{port}/v1", token
-    except Exception:
-        pass
+    except Exception as exc:
+        import os as _os
+        if _os.getenv("LORIEN_DEBUG"):
+            print(f"[lorien] gateway config parse failed: {exc}", flush=True)
     return None
 
 
@@ -179,6 +184,16 @@ class LorienIngester:
         text = text.strip()
         if not text:
             return IngestResult(errors=["Empty text"])
+        # Warn on large inputs — LLM extraction quality degrades above ~4k chars
+        _WARN_CHARS = 4_000
+        if self.llm_model and len(text) > _WARN_CHARS:
+            import warnings
+            warnings.warn(
+                f"ingest_text() received {len(text):,} chars — LLM extraction quality "
+                f"degrades above ~{_WARN_CHARS:,} chars. "
+                f"Use ingest_memory_md() for structured markdown documents.",
+                stacklevel=2,
+            )
         triples = self._llm_extract(text) if (self.llm_model and self.api_key) else None
         if triples is None:
             triples = self._keyword_extract(text)

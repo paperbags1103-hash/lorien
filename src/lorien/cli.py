@@ -74,8 +74,8 @@ def ingest(
     if verbose and model:
         click.echo(f"→ LLM mode: {model}")
 
-    filename = Path(file).name
-    if filename.upper().startswith("MEMORY") and file.endswith(".md"):
+    # Auto-route: .md files → section-aware ingest_memory_md(), others → ingest_text()
+    if Path(file).suffix.lower() == ".md":
         result = ingester.ingest_memory_md(file, verbose=verbose, batch_size=batch)
     else:
         text = Path(file).read_text(encoding="utf-8")
